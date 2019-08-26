@@ -10,8 +10,13 @@ typedef struct http2_connection_s http2_connection_t;
 typedef struct http2_stream_s http2_stream_t;
 
 typedef struct {
-	uint32_t		max_concurrenct_streams;
-} http2_conf_t;
+	uint32_t	header_table_size;
+	uint32_t	enable_push;
+	uint32_t	max_concurrent_streams;
+	uint32_t	initial_window_size;
+	uint32_t	max_frame_size;
+	uint32_t	max_header_list_size;
+} http2_settings_t;
 
 
 /* library init */
@@ -22,16 +27,16 @@ typedef void (*http2_hook_stream_body_f)(http2_stream_t *, const uint8_t *buf, i
 typedef void (*http2_hook_stream_end_f)(http2_stream_t *);
 typedef void (*http2_hook_stream_reset_f)(http2_stream_t *);
 typedef void (*http2_hook_control_frame_f)(http2_connection_t *, const uint8_t *, int);
-typedef void (*http2_hook_error_f)(http2_connection_t *);
+typedef void (*http2_hook_connection_close_f)(http2_connection_t *);
 typedef void (*http2_hook_log_f)(http2_connection_t *, const char *fmt, ...);
 
 void http2_library_init(http2_hook_stream_new_f, http2_hook_stream_header_f,
 		http2_hook_stream_body_f, http2_hook_stream_end_f,
 		http2_hook_stream_reset_f, http2_hook_control_frame_f,
-		http2_hook_error_f, http2_hook_log_f);
+		http2_hook_connection_close_f, http2_hook_log_f);
 
 /* connection */
-http2_connection_t *http2_connection_new(const http2_conf_t *conf);
+http2_connection_t *http2_connection_new(const http2_settings_t *settings);
 void http2_connection_close(http2_connection_t *h2c);
 
 void http2_connection_set_app_data(http2_connection_t *h2c, void *data);
@@ -66,5 +71,22 @@ void http2_make_frame_headers(http2_stream_t *stream, uint8_t *frame_pos,
 void http2_make_frame_body(http2_stream_t *stream, uint8_t *frame_pos,
 		int length, bool is_stream_end);
 
+
+enum http2_error {
+	HTTP2_NO_ERROR = 0,
+	HTTP2_PROTOCOL_ERROR,
+	HTTP2_INTERNAL_ERROR,
+	HTTP2_FLOW_CONTROL_ERROR,
+	HTTP2_SETTINGS_TIMEOUT,
+	HTTP2_STREAM_CLOSED,
+	HTTP2_FRAME_SIZE_ERROR,
+	HTTP2_REFUSED_STREAM,
+	HTTP2_CANCEL,
+	HTTP2_COMPRESSION_ERROR,
+	HTTP2_CONNECT_ERROR,
+	HTTP2_ENHANCE_YOUR_CALM,
+	HTTP2_INADEQUATE_SECURITY,
+	HTTP2_HTTP_1_1_REQUIRED,
+};
 
 #endif

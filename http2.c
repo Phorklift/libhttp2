@@ -8,13 +8,11 @@
 
 #include "http2.h"
 
-#define error_log(...)
-#define connection_close(...)
-#define FTRACE_CONN
-
 typedef int http2_process_f(http2_connection_t *, const uint8_t *, int);
 
 struct http2_connection_s {
+
+	wuy_list_node_t		list_node;
 
 	wuy_list_t		streams_in_request;
 	wuy_list_t		streams_in_response;
@@ -24,7 +22,6 @@ struct http2_connection_s {
 	uint32_t		last_stream_id_out;
 
 	uint32_t		send_window;
-	uint32_t		initial_window_size;
 
 	/* current frame in parse */
 	struct {
@@ -36,19 +33,25 @@ struct http2_connection_s {
 
 	hpack_t			*hpack_decode;
 
-	const http2_conf_t	*conf;
+	http2_settings_t	remote_settings;
+	const http2_settings_t	*local_settings;
 
 	void			*app_data;
 
+	bool			closed;
 	bool			recv_goaway;
 	bool			want_ping_ack;
 	bool			want_settings_ack;
 };
 
+typedef struct http2_priority_s http2_priority_t;
+
 struct http2_stream_s {
 	wuy_list_node_t		list_node;
 
 	http2_connection_t	*h2c;
+
+	http2_priority_t	*priority;
 
 	uint32_t		id;
 
@@ -65,6 +68,15 @@ struct http2_stream_s {
 	void			*app_data;
 };
 
+struct http2_priority_s {
+	http2_stream_t		*stream;
+
+	http2_priority_t	*parent;
+	wuy_list_node_t		brother;
+	wuy_list_t		children;
+
+};
+
 
 typedef struct {
 	uint8_t		len1, len2, len3;
@@ -74,8 +86,13 @@ typedef struct {
 } http2_frame_header_t;
 
 
-static wuy_pool_t *http2_pool_h2c;
+static wuy_pool_t *http2_pool_connection;
 static wuy_pool_t *http2_pool_stream;
+static wuy_pool_t *http2_pool_priority;
+static WUY_LIST(http2_active_connection);
+static WUY_LIST(http2_defer_connection);
+static WUY_LIST(http2_defer_stream);
+static WUY_LIST(http2_defer_priority);
 
 #define HTTP2_FRAME_DATA		0x0
 #define HTTP2_FRAME_HEADERS		0x1
@@ -103,7 +120,7 @@ static http2_hook_stream_body_f http2_hook_stream_body;
 static http2_hook_stream_end_f http2_hook_stream_end;
 static http2_hook_stream_reset_f http2_hook_stream_reset;
 static http2_hook_control_frame_f http2_hook_control_frame;
-static http2_hook_error_f http2_hook_error;
+static http2_hook_connection_close_f http2_hook_connection_close;
 static http2_hook_log_f http2_hook_log;
 
 #define http2_log(h2c, fmt, ...) \
@@ -203,19 +220,25 @@ static int http2_send_frame_settings_ack(http2_connection_t *h2c)
 	return 0;
 }
 
-static int http2_process_frame_unknown(http2_connection_t *c,
+static void http2_send_frame_rst_stream(http2_connection_t *h2c, uint32_t id, uint32_t err_code)
+{
+	uint8_t buffer[sizeof(http2_frame_header_t) + 4];
+
+	memcpy(buffer + sizeof(http2_frame_header_t), &err_code, 4); // bigendian??
+
+	http2_build_frame_header(buffer, 4, HTTP2_FRAME_RST_STREAM, 0, id);
+	http2_hook_control_frame(h2c, buffer, sizeof(buffer));
+}
+
+static int http2_process_frame_unknown(http2_connection_t *h2c,
 		const uint8_t *buffer, int length)
 {
-	FTRACE_CONN;
-
 	return length;
 }
 
 static int http2_process_frame_settings(http2_connection_t *h2c,
 		const uint8_t *buffer, int length)
 {
-	FTRACE_CONN;
-
 	if (h2c->frame.flags & HTTP2_FLAG_ACK) {
 		return length;
 	}
@@ -239,22 +262,27 @@ static int http2_process_frame_settings(http2_connection_t *h2c,
 
 		switch (id) {
 		case 0x1:
-			// hpack_max_size(&h2c->hpack_decode, value);
+			h2c->remote_settings.header_table_size = value;
+			hpack_max_size(h2c->hpack_decode, value);
 			break;
 		case 0x2:
+			h2c->remote_settings.enable_push = value;
 			break;
 		case 0x3:
-			// h2c->peer_settings.concur_stream_max = value;
+			h2c->remote_settings.max_concurrent_streams = value;
 			break;
 		case 0x4:
 			if (value > 0x7FFFFFFF) {
 				http2_log(h2c, "too big WINDOW_SIZE");
 				return HTTP2_ERROR;
 			}
-			// h2c->peer_settings.initial_window_size = value;
+			h2c->remote_settings.initial_window_size = value;
 			break;
 		case 0x5:
+			h2c->remote_settings.max_frame_size = value;
+			break;
 		case 0x6:
+			h2c->remote_settings.max_header_list_size = value;
 			break;
 		default:
 			;
@@ -269,8 +297,6 @@ static int http2_process_frame_settings(http2_connection_t *h2c,
 static int http2_process_frame_ping(http2_connection_t *h2c,
 		const uint8_t *buffer, int length)
 {
-	FTRACE_CONN;
-
 	if (h2c->frame.flags & HTTP2_FLAG_ACK) {
 		if (!h2c->want_ping_ack) {
 			// TODO
@@ -293,8 +319,6 @@ static int http2_process_frame_ping(http2_connection_t *h2c,
 static int http2_process_frame_goaway(http2_connection_t *h2c,
 		const uint8_t *buffer, int length)
 {
-	FTRACE_CONN;
-
 	if (length < h2c->frame.left) {
 		return 0;
 	}
@@ -331,8 +355,7 @@ static http2_stream_t *http2_current_stream(http2_connection_t *h2c)
 
 static http2_stream_t *http2_stream_new(http2_connection_t *h2c)
 {
-	error_log(h2c->connection->error_log, http2_LOG_DEBUG, "new stream: %u",
-			h2c->frame.stream_id);
+	http2_log(h2c, "new stream: %u", h2c->frame.stream_id);
 
 	http2_stream_t *stream = wuy_pool_alloc(http2_pool_stream);
 	if (stream == NULL) {
@@ -343,7 +366,7 @@ static http2_stream_t *http2_stream_new(http2_connection_t *h2c)
 
 	stream->id = h2c->frame.stream_id;
 	stream->h2c = h2c;
-	stream->send_window = h2c->initial_window_size;
+	stream->send_window = h2c->remote_settings.initial_window_size;
 	if (h2c->frame.flags & HTTP2_FLAG_END_HEADERS) {
 		stream->end_headers = 1;
 	}
@@ -369,27 +392,21 @@ void http2_stream_close(http2_stream_t *stream)
 	// TODO
 
 	wuy_list_delete(&stream->list_node);
-
-	wuy_pool_free(stream);
-	return;
+	wuy_list_append(&http2_defer_stream, &stream->list_node);
 }
 
 static int http2_process_frame_window_update(http2_connection_t *h2c,
 		const uint8_t *buffer, int length)
 {
-	FTRACE_CONN;
-
 	if (length < h2c->frame.left) {
 		return 0;
 	}
 	if (h2c->frame.left != 4) {
-		connection_close(c, "invalid WINDOW_UPDATE frame", "");
 		return HTTP2_ERROR;
 	}
 
 	const uint8_t *p = buffer;
 	if ((p[0] & 0x80) != 0) {
-		connection_close(c, "invalid WINDOW_UPDATE size", "");
 		return HTTP2_ERROR;
 	}
 	uint32_t size = p[0] << 24 | p[1] << 16 | p[2] << 8 | p[3];
@@ -403,8 +420,7 @@ static int http2_process_frame_window_update(http2_connection_t *h2c,
 		}
 	}
 
-	error_log(c->error_log, http2_LOG_DEBUG, "WINDOW_UPDATE %d %d",
-			h2c->frame.stream_id, size);
+	http2_log(h2c, "WINDOW_UPDATE %u %u", h2c->frame.stream_id, size);
 
 	return length;
 }
@@ -415,15 +431,16 @@ static void http2_stream_check_end(http2_stream_t *stream, int proc_len)
 	http2_connection_t *h2c = stream->h2c;
 
 	if (!(h2c->frame.flags & HTTP2_FLAG_END_STREAM)) {
-		http2_log(h2c, "http2_stream_check_end no 1");
+		http2_log(h2c, "stream %u request not end for flags", stream->id);
 		return;
 	}
 	if (h2c->frame.left != proc_len) {
-		http2_log(h2c, "http2_stream_check_end no 2 %d %d", h2c->frame.left, proc_len);
+		http2_log(h2c, "stream %u request not end for length: %d %d",
+				stream->id, h2c->frame.left, proc_len);
 		return;
 	}
 
-	http2_log(h2c, "http2_stream_check_end yes");
+	http2_log(h2c, "stream %u request end", stream->id);
 
 	http2_hook_stream_end(stream);
 
@@ -435,8 +452,6 @@ static void http2_stream_check_end(http2_stream_t *stream, int proc_len)
 static int http2_process_frame_data(http2_connection_t *h2c,
 		const uint8_t *buffer, int length)
 {
-	FTRACE_CONN;
-
 	http2_stream_t *stream = http2_current_stream(h2c);
 	if (stream == NULL) { /* has been closed */
 		return length;
@@ -456,8 +471,6 @@ static int http2_process_frame_data(http2_connection_t *h2c,
 static int http2_process_header_entry(http2_stream_t *stream,
 		const uint8_t *buffer, int length)
 {
-	FTRACE_CONN;
-
 	const char *name_str, *value_str;
 	int name_len, value_len;
 
@@ -472,9 +485,6 @@ static int http2_process_header_entry(http2_stream_t *stream,
 		http2_log(stream->h2c, "hpack decode fail");
 		return HTTP2_ERROR;
 	}
-
-	error_log(c->error_log, http2_LOG_DEBUG,
-			"hpack decode header %d %s", proc_len, name_str);
 
 	http2_hook_stream_header(stream, name_str, name_len, value_str, value_len);
 
@@ -509,8 +519,6 @@ static int http2_process_headers(http2_stream_t *stream,
 static int http2_process_frame_continuation(http2_connection_t *h2c,
 		const uint8_t *buffer, int length)
 {
-	FTRACE_CONN;
-
 	http2_stream_t *stream = http2_current_stream(h2c);
 	if (stream == NULL) {
 		return HTTP2_ERROR;
@@ -536,8 +544,6 @@ static int http2_process_frame_headers_remain(http2_connection_t *h2c,
 static int http2_process_frame_headers(http2_connection_t *h2c,
 		const uint8_t *buffer, int length)
 {
-	FTRACE_CONN;
-
 	int priority_len = 0;
 
 	/* parse priority */
@@ -561,14 +567,14 @@ static int http2_process_frame_headers(http2_connection_t *h2c,
 		http2_log(h2c, "invalid stream id");
 		return HTTP2_ERROR;
 	}
-	if (h2c->stream_num == h2c->conf->max_concurrenct_streams) {
-		printf(" -- too many streams\n");
-		return HTTP2_ERROR; // XXX return what?
+	if (h2c->stream_num == h2c->local_settings->max_concurrent_streams) {
+		http2_log(h2c, "exceed max_concurrent_streams");
+		http2_send_frame_rst_stream(h2c, stream_id, HTTP2_REFUSED_STREAM);
+		return length;
 	}
 
 	http2_stream_t *stream = http2_stream_new(h2c);
 	if (stream == NULL) {
-		http2_log(h2c, "new stream fails");
 		return HTTP2_ERROR;
 	}
 
@@ -583,12 +589,11 @@ static int http2_process_frame_headers(http2_connection_t *h2c,
 static int http2_process_preface(http2_connection_t *h2c,
 		const uint8_t *buffer, int length)
 {
-	FTRACE_CONN;
-
 	if (length < 24) {
 		return 0;
 	}
 	if (memcmp(buffer, "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n", 24) != 0) {
+		http2_log(h2c, "invalid preface");
 		return HTTP2_ERROR;
 	}
 
@@ -616,8 +621,6 @@ static http2_process_f *http2_frame_handlers[] = {
 static int http2_process_frame_header(http2_connection_t *h2c,
 		const uint8_t *buffer, int length)
 {
-	FTRACE_CONN;
-
 	if (length < sizeof(http2_frame_header_t)) {
 		return 0;
 	}
@@ -629,11 +632,11 @@ static int http2_process_frame_header(http2_connection_t *h2c,
 	h2c->frame.stream_id = (header->sid1 << 24) + (header->sid2 << 16)
 			+ (header->sid3 << 8) + header->sid4;
 
-	http2_log(h2c, "receive frame type=%d len=%d flags=0x%x sid=%d",
+	http2_log(h2c, "[debug] receive frame type=%d len=%d flags=0x%x sid=%d",
 			h2c->frame.type, h2c->frame.left, h2c->frame.flags, h2c->frame.stream_id);
 
 	if (h2c->frame.type >= HTTP2_FRAME_UNKNOWN) {
-		printf("unknow frame type %d\n", h2c->frame.type);
+		printf("[info] unknow frame type %d\n", h2c->frame.type);
 		h2c->frame.type = HTTP2_FRAME_UNKNOWN;
 	}
 
@@ -644,7 +647,7 @@ static int http2_process_frame_header(http2_connection_t *h2c,
 #define MIN(a,b) (a)<(b)?(a):(b)
 int http2_connection_process(http2_connection_t *h2c, const uint8_t *buf_pos, int buf_len)
 {
-	http2_log(h2c, "http2_connection_process %d", buf_len);
+	http2_log(h2c, "[debug] http2_connection_process %d", buf_len);
 
 	int buf_left = buf_len;
 	while (buf_left > 0) {
@@ -655,8 +658,6 @@ int http2_connection_process(http2_connection_t *h2c, const uint8_t *buf_pos, in
 			proc_len = http2_frame_handlers[h2c->frame.type](h2c,
 					buf_pos, MIN(buf_left, h2c->frame.left));
 		}
-
-		http2_log(h2c, "process length %d", proc_len);
 
 		if (proc_len == 0) {
 			break;
@@ -670,7 +671,7 @@ int http2_connection_process(http2_connection_t *h2c, const uint8_t *buf_pos, in
 		buf_left -= proc_len;
 	}
 
-	http2_log(h2c, "process total %d", buf_len - buf_left);
+	http2_log(h2c, "[debug] process end with total %d", buf_len - buf_left);
 	return buf_len - buf_left;
 }
 
@@ -683,27 +684,74 @@ http2_stream_t *http2_response_stream(http2_connection_t *h2c)
 	return wuy_containerof(node, http2_stream_t, list_node);
 }
 
-http2_connection_t *http2_connection_new(const http2_conf_t *conf)
+http2_connection_t *http2_connection_new(const http2_settings_t *settings)
 {
-	http2_connection_t *h2c = wuy_pool_alloc(http2_pool_h2c);
+	http2_connection_t *h2c = wuy_pool_alloc(http2_pool_connection);
 	if (h2c == NULL) {
 		return NULL;
 	}
+
+	http2_log(h2c, "[debug] new connection %p", h2c);
 
 	bzero(h2c, sizeof(http2_connection_t));
 
 	h2c->frame.type = HTTP2_FRAME_PREFACE;
 	h2c->frame.left = 24; /* length of preface */
-	h2c->initial_window_size = 65535;
-	h2c->send_window = h2c->initial_window_size;
-	h2c->conf = conf;
+	h2c->send_window = settings->initial_window_size;
+	h2c->local_settings = settings;
 	h2c->hpack_decode = hpack_new(4096); /* see RFC7540 section 6.5.2 */
 	wuy_list_init(&h2c->streams_in_request);
 	wuy_list_init(&h2c->streams_in_response);
 
+	wuy_list_append(&http2_active_connection, &h2c->list_node);
+
 	return h2c;
 }
 
+void http2_connection_close(http2_connection_t *h2c)
+{
+	if (h2c->closed) {
+		return;
+	}
+	h2c->closed = true;
+
+	http2_log(h2c, "[debug] close connection %p", h2c);
+
+	// http2_send_frame_goaway(h2c, err_code);
+
+	http2_hook_connection_close(h2c);
+
+	hpack_free(h2c->hpack_decode);
+
+	wuy_list_node_t *node;
+	while ((node = wuy_list_first(&h2c->streams_in_request)) != NULL) {
+		http2_stream_close(wuy_containerof(node, http2_stream_t, list_node));
+	}
+
+	// TODO streams_in_response
+
+	wuy_list_delete(&h2c->list_node);
+	wuy_list_append(&http2_defer_connection, &h2c->list_node);
+}
+
+void http2_clear_defer(void)
+{
+	wuy_list_node_t *node;
+	while ((node = wuy_list_first(&http2_defer_connection)) != NULL) {
+		wuy_list_delete(node);
+		wuy_pool_free(wuy_containerof(node, http2_connection_t, list_node));
+	}
+	while ((node = wuy_list_first(&http2_defer_stream)) != NULL) {
+		wuy_list_delete(node);
+		wuy_pool_free(wuy_containerof(node, http2_stream_t, list_node));
+	}
+	while ((node = wuy_list_first(&http2_defer_priority)) != NULL) {
+		wuy_list_delete(node);
+		wuy_pool_free(wuy_containerof(node, http2_priority_t, brother));
+	}
+}
+
+/* some getters and setters */
 void http2_connection_set_app_data(http2_connection_t *h2c, void *data)
 {
 	h2c->app_data = data;
@@ -711,6 +759,10 @@ void http2_connection_set_app_data(http2_connection_t *h2c, void *data)
 void *http2_connection_get_app_data(http2_connection_t *h2c)
 {
 	return h2c->app_data;
+}
+uint32_t http2_connection_get_send_window(http2_connection_t *h2c)
+{
+	return h2c->send_window;
 }
 
 void http2_stream_set_app_data(http2_stream_t *stream, void *data)
@@ -725,20 +777,22 @@ http2_connection_t *http2_stream_get_connection(http2_stream_t *stream)
 {
 	return stream->h2c;
 }
-
-void http2_connection_close(http2_connection_t *h2c)
+uint32_t http2_stream_get_send_window(http2_stream_t *stream)
 {
+	return MIN(stream->send_window, stream->h2c->send_window);
 }
+
 
 void http2_library_init(http2_hook_stream_new_f stream_new, http2_hook_stream_header_f stream_header,
 		http2_hook_stream_body_f stream_body, http2_hook_stream_end_f stream_end,
 		http2_hook_stream_reset_f stream_reset, http2_hook_control_frame_f control_frame,
-		http2_hook_error_f error, http2_hook_log_f log)
+		http2_hook_connection_close_f connection_close, http2_hook_log_f log)
 {
 	hpack_library_init(true);
 
-	http2_pool_h2c = wuy_pool_new_type(http2_connection_t);
+	http2_pool_connection = wuy_pool_new_type(http2_connection_t);
 	http2_pool_stream = wuy_pool_new_type(http2_stream_t);
+	http2_pool_priority = wuy_pool_new_type(http2_priority_t);
 
 	http2_hook_stream_new = stream_new;
 	http2_hook_stream_header = stream_header;
@@ -746,6 +800,6 @@ void http2_library_init(http2_hook_stream_new_f stream_new, http2_hook_stream_he
 	http2_hook_stream_end = stream_end;
 	http2_hook_stream_reset = stream_reset;
 	http2_hook_control_frame = control_frame;
-	http2_hook_error = error;
+	http2_hook_connection_close = connection_close;
 	http2_hook_log = log;
 }
