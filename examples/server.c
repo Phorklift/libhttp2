@@ -5,6 +5,7 @@
 #include <string.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <fcntl.h>
 #include <stdlib.h>
 
@@ -90,6 +91,18 @@ int ssl_alpn_callback(SSL *ssl, const unsigned char **out, unsigned char *outlen
 	return SSL_TLSEXT_ERR_OK;
 }
 
+void connection_close(example_connection_t *c)
+{
+	http2_connection_close(c->h2c);
+
+	/* send GOAWAY */
+	loop_stream_write(c->loop_stream, c->buf_start, c->buf_end - c->buf_start);
+	c->buf_end = c->buf_start = c->buffer;
+
+	loop_stream_close(c->loop_stream);
+	wuy_pool_free(c);
+}
+
 #define BUFFER_SIZE (16*4096)
 bool on_accept(loop_tcp_listen_t *tl, loop_stream_t *s, struct sockaddr *addr)
 {
@@ -106,10 +119,10 @@ bool on_accept(loop_tcp_listen_t *tl, loop_stream_t *s, struct sockaddr *addr)
 	c->loop_stream = s;
 
 	/* create http2_connection_t and attach it with example_connection_t */
-	static http2_conf_t http2_conf = {
-		.max_concurrenct_streams = 100,
+	static http2_settings_t settings = {
+		.max_concurrent_streams = 100,
 	};
-	http2_connection_t *h2c = http2_connection_new(&http2_conf);
+	http2_connection_t *h2c = http2_connection_new(&settings);
 	http2_connection_set_app_data(h2c, c);
 	c->h2c = h2c;
 	return true;
@@ -156,9 +169,13 @@ void exm_http2_hook_stream_end(http2_stream_t *s)
 	r->fp = fopen(path, "r");
 	printf("open file: %s\n", path);
 
-	struct stat st_buf;
-	stat(path, &st_buf);
-	r->content_length = st_buf.st_size;
+	if (r->fp != NULL) {
+		struct stat st_buf;
+		stat(path, &st_buf);
+		r->content_length = st_buf.st_size;
+	} else {
+		r->content_length = 0;
+	}
 }
 void exm_http2_hook_control_frame(http2_connection_t *h2c, const uint8_t *buf, int len)
 {
@@ -244,12 +261,13 @@ ssize_t on_read(loop_stream_t *s, void *data, size_t len)
 
 	int proc_len = http2_connection_process(c->h2c, data, len);
 	if (proc_len < 0) {
+		connection_close(c);
 		return -1;
 	}
 
-	http2_stream_t *stream;
-	while ((stream = http2_response_stream(c->h2c)) != NULL) {
-		response(http2_stream_get_app_data(stream));
+	http2_stream_t *h2s;
+	while ((h2s = http2_response_stream(c->h2c)) != NULL) {
+		response(http2_stream_get_app_data(h2s));
 		break;
 	}
 
@@ -266,6 +284,8 @@ ssize_t on_read(loop_stream_t *s, void *data, size_t len)
 void on_close(loop_stream_t *s, const char *reason, int err)
 {
 	printf(" -- close: %s %d %s\n", reason, err, ERR_error_string(ERR_get_error(), NULL));
+
+	connection_close(loop_stream_get_app_data(s));
 }
 
 void exm_http2_hook_log(http2_connection_t *h2c, const char *fmt, ...)
@@ -275,7 +295,11 @@ void exm_http2_hook_log(http2_connection_t *h2c, const char *fmt, ...)
 	va_start(ap, fmt);
 	vsprintf(buffer, fmt, ap);
 	va_end(ap);
-	printf("[HTTP2] %s\n", buffer);
+
+	struct timeval now;
+	gettimeofday(&now, NULL);
+
+	printf("%ld.%06ld [HTTP2] %s\n", now.tv_sec, now.tv_usec, buffer);
 }
 
 int main()
@@ -283,7 +307,7 @@ int main()
 	/* library init */
 	http2_library_init(exm_http2_hook_stream_new, exm_http2_hook_stream_header,
 			exm_http2_hook_stream_body, exm_http2_hook_stream_end, NULL,
-			exm_http2_hook_control_frame, NULL, exm_http2_hook_log);
+			exm_http2_hook_control_frame, exm_http2_hook_log);
 
 	SSL_load_error_strings();	
 	OpenSSL_add_ssl_algorithms();

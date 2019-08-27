@@ -26,13 +26,12 @@ typedef void (*http2_hook_stream_body_f)(http2_stream_t *, const uint8_t *buf, i
 typedef void (*http2_hook_stream_end_f)(http2_stream_t *);
 typedef void (*http2_hook_stream_reset_f)(http2_stream_t *);
 typedef void (*http2_hook_control_frame_f)(http2_connection_t *, const uint8_t *, int);
-typedef void (*http2_hook_connection_close_f)(http2_connection_t *);
 typedef void (*http2_hook_log_f)(http2_connection_t *, const char *fmt, ...);
 
 void http2_library_init(http2_hook_stream_new_f, http2_hook_stream_header_f,
 		http2_hook_stream_body_f, http2_hook_stream_end_f,
 		http2_hook_stream_reset_f, http2_hook_control_frame_f,
-		http2_hook_connection_close_f, http2_hook_log_f);
+		http2_hook_log_f);
 
 /* connection */
 http2_connection_t *http2_connection_new(const http2_settings_t *settings);
