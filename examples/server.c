@@ -259,16 +259,15 @@ ssize_t on_read(loop_stream_t *s, void *data, size_t len)
 {
 	example_connection_t *c = loop_stream_get_app_data(s);
 
-	int proc_len = http2_connection_process(c->h2c, data, len);
+	int proc_len = http2_process_input(c->h2c, data, len);
 	if (proc_len < 0) {
 		connection_close(c);
 		return -1;
 	}
 
 	http2_stream_t *h2s;
-	while ((h2s = http2_response_stream(c->h2c)) != NULL) {
+	while ((h2s = http2_schedular(c->h2c)) != NULL) {
 		response(http2_stream_get_app_data(h2s));
-		break;
 	}
 
 	if (c->buf_end > c->buf_start) {

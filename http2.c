@@ -53,8 +53,11 @@ struct http2_connection_s {
 
 typedef struct http2_priority_s http2_priority_t;
 struct http2_priority_s {
+	bool			active;
 	bool			exclusive;
 	uint8_t			weight;
+
+	float			consumed;
 
 	uint32_t		id;
 	http2_stream_t		*s;
@@ -200,6 +203,15 @@ void http2_make_frame_body(http2_stream_t *s, uint8_t *frame_pos,
 		flags |= HTTP2_FLAG_END_STREAM;
 	}
 	http2_build_frame_header(frame_pos, length, HTTP2_FRAME_DATA, flags, s->p->id);
+
+	/* re-schedular */
+	s->p->active = true;
+	float consumed = (float)length;
+	http2_priority_t *p;
+	for (p = s->p; p != NULL; p = p->parent) {
+		p->consumed += consumed / p->weight;
+		// TODO
+	}
 }
 
 
@@ -431,8 +443,10 @@ static http2_priority_t *http2_priority_new(http2_connection_t *c, uint32_t id)
 	if (p == NULL) {
 		return NULL;
 	}
+	bzero(p, sizeof(http2_priority_t));
 
 	p->id = id;
+	p->active = true;
 	http2_priority_hash_add(c, p);
 	wuy_list_node_init(&p->brother);
 	wuy_list_init(&p->children);
@@ -587,6 +601,8 @@ static int http2_process_frame_window_update(http2_connection_t *c,
 static void http2_priority_update(http2_priority_t *p, http2_connection_t *c,
 		bool exclusive, uint32_t dependency, uint8_t weight)
 {
+	http2_log(c, "http2_priority_update %u on %u, weight=%d, exclusive=%d", p->id, dependency, weight, exclusive);
+
 	p->exclusive = exclusive;
 	p->weight = weight;
 
@@ -878,9 +894,9 @@ static int http2_process_frame_header(http2_connection_t *c,
 }
 
 #define MIN(a,b) (a)<(b)?(a):(b)
-int http2_connection_process(http2_connection_t *c, const uint8_t *buf_pos, int buf_len)
+int http2_process_input(http2_connection_t *c, const uint8_t *buf_pos, int buf_len)
 {
-	http2_log(c, "[debug] http2_connection_process %d", buf_len);
+	http2_log(c, "[debug] http2_process_input %d", buf_len);
 
 	if (c->goaway_error_code != 0) {
 		return -2;
@@ -922,10 +938,26 @@ int http2_connection_process(http2_connection_t *c, const uint8_t *buf_pos, int 
 	return buf_len - buf_left;
 }
 
-http2_stream_t *http2_response_stream(http2_connection_t *c)
+static http2_stream_t *http2_do_schedular(wuy_list_t *children)
 {
 	wuy_list_node_t *node;
+	wuy_list_iter(children, node) {
+		http2_priority_t *p = wuy_containerof(node, http2_priority_t, brother);
+		if (p->s != NULL && p->active) {
+			http2_log(p->s->c, "[debug] schedular pick stream: %u", p->id);
+			p->active = false;
+			return p->s;
+		}
+		http2_stream_t *s = http2_do_schedular(&p->children);
+		if (s != NULL) {
+			return s;
+		}
+	}
 	return NULL;
+}
+http2_stream_t *http2_schedular(http2_connection_t *c)
+{
+	return http2_do_schedular(&c->priority_root_children);
 }
 
 

@@ -40,9 +40,9 @@ void http2_connection_close(http2_connection_t *c);
 void http2_connection_set_app_data(http2_connection_t *c, void *data);
 void *http2_connection_get_app_data(http2_connection_t *c);
 
-int http2_connection_process(http2_connection_t *c, const uint8_t *buf_pos, int buf_len);
+int http2_process_input(http2_connection_t *c, const uint8_t *buf_pos, int buf_len);
 
-http2_stream_t *http2_response_stream(http2_connection_t *c);
+http2_stream_t *http2_schedular(http2_connection_t *c);
 
 int http2_connection_idle_time(http2_connection_t *c);
 
