@@ -15,7 +15,15 @@ struct http2_connection_s {
 	wuy_list_node_t		list_node;
 
 #define HTTP2_BUCKET_SIZE	8
+	/* all priority nodes (include open and closed) are indexed here for searching */
 	wuy_hlist_head_t	priority_buckets[HTTP2_BUCKET_SIZE];
+
+	/* all priority nodes (include open and closed) are listed here as dependency tree */
+	wuy_list_t		priority_root_children;
+
+	/* only closed priority nodes are listed here in LRU order */
+	wuy_list_t		priority_closed_lru;
+	int			priority_closed_num;
 
 	int			stream_num;
 
@@ -35,9 +43,6 @@ struct http2_connection_s {
 		int			left;
 		uint32_t		stream_id;
 	}			frame;
-
-	wuy_list_t		priority_root_children;
-	wuy_list_t		priority_idle_head; // TODO
 
 	hpack_t			*hpack_decode;
 
@@ -67,7 +72,7 @@ struct http2_priority_s {
 	wuy_list_t		children;
 
 	wuy_hlist_node_t	hash_node;
-	wuy_list_node_t		idle_node;
+	wuy_list_node_t		closed_node;
 };
 
 struct http2_stream_s {
@@ -102,7 +107,7 @@ enum http2_frame_type {
 	HTTP2_FRAME_WINDOW_UPDATE,
 	HTTP2_FRAME_CONTINUATION,
 	HTTP2_FRAME_UNKNOWN,
-	HTTP2_FRAME_HEADERS_REMAIN,
+	HTTP2_FRAME_HEADERS_REMAINING,
 	HTTP2_FRAME_PREFACE,
 };
 
@@ -288,7 +293,126 @@ static void http2_send_frame_goaway(http2_connection_t *c, uint32_t error_code)
 }
 
 
-/* == create and close stream and connection */
+/* === priority operations */
+
+static uint32_t http2_priority_hash_index(uint32_t id)
+{
+	return (id >> 1) % HTTP2_BUCKET_SIZE;
+}
+static void http2_priority_hash_add(http2_connection_t *c, http2_priority_t *p)
+{
+	uint32_t index = http2_priority_hash_index(p->id);
+	wuy_hlist_insert(&c->priority_buckets[index], &p->hash_node);
+}
+static void http2_priority_hash_delete(http2_priority_t *p)
+{
+	wuy_hlist_delete(&p->hash_node);
+}
+static http2_priority_t *http2_priority_hash_search(http2_connection_t *c, uint32_t id)
+{
+	uint32_t index = http2_priority_hash_index(id);
+	wuy_hlist_node_t *node;
+	wuy_hlist_iter(&c->priority_buckets[index], node) {
+		http2_priority_t *p = wuy_containerof(node, http2_priority_t, hash_node);
+		if (p->id == id) {
+			return p;
+		}
+	}
+	return NULL;
+}
+
+static void http2_priority_set_dependency(http2_priority_t *p,
+		http2_priority_t *parent, http2_connection_t *c)
+{
+	p->parent = parent;
+
+	wuy_list_t *children = (parent != NULL) ? &parent->children : &c->priority_root_children;
+
+	if (p->exclusive) {
+		/* If exclusive, we do not make a new tree level as RFC,
+		 * which increases tree depth and brings some more cost
+		 * to maintain the tree. */
+		wuy_list_insert(children, &p->brother);
+	} else {
+		wuy_list_append(children, &p->brother);
+	}
+}
+
+static http2_priority_t *http2_priority_new(http2_connection_t *c, uint32_t id)
+{
+	http2_priority_t *p = wuy_pool_alloc(http2_pool_priority);
+	if (p == NULL) {
+		return NULL;
+	}
+	bzero(p, sizeof(http2_priority_t));
+
+	p->id = id;
+	p->active = true;
+	http2_priority_hash_add(c, p);
+	wuy_list_node_init(&p->brother);
+	wuy_list_init(&p->children);
+	return p;
+}
+
+static void http2_priority_close(http2_priority_t *p)
+{
+	http2_connection_t *c = p->s->c;
+
+	p->s = NULL;
+
+	wuy_list_insert(&c->priority_closed_lru, &p->closed_node);
+
+	if (c->priority_closed_num < 20) {
+		c->priority_closed_num++;
+		return;
+	}
+
+	/* delete the last one */
+	wuy_list_node_t *node = wuy_list_last(&c->priority_closed_lru);
+	p = wuy_containerof(node, http2_priority_t, closed_node);
+	wuy_list_delete(node);
+	wuy_list_delete(&p->brother);
+	http2_priority_hash_delete(p);
+
+	wuy_list_node_t *safe;
+	wuy_list_iter_safe(&p->children, node, safe) {
+		http2_priority_t *pc = wuy_containerof(node, http2_priority_t, brother);
+		http2_priority_set_dependency(pc, p->parent, c);
+	}
+
+	wuy_pool_free(p);
+}
+
+static http2_stream_t *http2_do_schedular(wuy_list_t *children)
+{
+	wuy_list_node_t *node;
+	wuy_list_iter(children, node) {
+		http2_priority_t *p = wuy_containerof(node, http2_priority_t, brother);
+		if (p->s != NULL && p->active) {
+			http2_log(p->s->c, "[debug] schedular pick stream: %u", p->id);
+
+			/* Clear p->active in case the stream becomes inactive.
+			 * We will active it later in http2_make_frame_body() if still active. */
+			p->active = false;
+
+			return p->s;
+		}
+
+		/* search an active stream from its children */
+		http2_stream_t *s = http2_do_schedular(&p->children);
+		if (s != NULL) {
+			return s;
+		}
+	}
+	return NULL;
+}
+http2_stream_t *http2_schedular(http2_connection_t *c)
+{
+	return http2_do_schedular(&c->priority_root_children);
+}
+
+
+/* == stream operations */
 
 static http2_stream_t *http2_stream_new(http2_connection_t *c)
 {
@@ -319,12 +443,26 @@ static http2_stream_t *http2_stream_new(http2_connection_t *c)
 
 void http2_stream_close(http2_stream_t *s)
 {
-	s->c->stream_num--;
+	http2_connection_t *c = s->c;
 
-	s->p->s = NULL; // TODO mark priority as idle
+	c->stream_num--;
+
+	http2_priority_close(s->p);
 
 	wuy_pool_free(s);
 }
+
+static http2_stream_t *http2_stream_current(http2_connection_t *c)
+{
+	http2_priority_t *p = http2_priority_hash_search(c, c->frame.stream_id);
+	if (p == NULL) {
+		return NULL;
+	}
+	return p->s;
+}
+
+
+/* == connection operations */
 
 http2_connection_t *http2_connection_new(const http2_settings_t *settings)
 {
@@ -343,7 +481,7 @@ http2_connection_t *http2_connection_new(const http2_settings_t *settings)
 	c->local_settings = settings;
 	c->hpack_decode = hpack_new(4096); /* see RFC7540 section 6.5.2 */
 	wuy_list_init(&c->priority_root_children);
-	wuy_list_init(&c->priority_idle_head);
+	wuy_list_init(&c->priority_closed_lru);
 
 	int i;
 	for (i = 0; i < HTTP2_BUCKET_SIZE; i++) {
@@ -369,88 +507,19 @@ void http2_connection_close(http2_connection_t *c)
 		wuy_hlist_iter_safe(&c->priority_buckets[i], node, safe) {
 			http2_priority_t *p = wuy_containerof(node, http2_priority_t, hash_node);
 			if (p->s != NULL) {
-				http2_stream_close(p->s);
+				/* http2_stream_close() is expected to be called in the hook */
+				http2_hook_stream_reset(p->s);
 			}
-			wuy_pool_free(p); // XXX
 		}
+	}
+
+	wuy_list_node_t *node, *safe;
+	wuy_list_iter_safe(&c->priority_closed_lru, node, safe) {
+		http2_priority_t *p = wuy_containerof(node, http2_priority_t, closed_node);
+		wuy_pool_free(p);
 	}
 
 	wuy_pool_free(c);
-}
-
-
-/* == A simple dict which index priority nodes on connection */
-static uint32_t http2_priority_hash_index(uint32_t id)
-{
-	return (id >> 1) % HTTP2_BUCKET_SIZE;
-}
-static void http2_priority_hash_add(http2_connection_t *c, http2_priority_t *p)
-{
-	uint32_t index = http2_priority_hash_index(p->id);
-	wuy_hlist_insert(&c->priority_buckets[index], &p->hash_node);
-}
-//static void http2_priority_hash_delete(http2_priority_t *p)
-//{
-	//wuy_hlist_delete(&p->hash_node);
-//}
-static http2_priority_t *http2_priority_hash_search(http2_connection_t *c, uint32_t id)
-{
-	uint32_t index = http2_priority_hash_index(id);
-	wuy_hlist_node_t *node;
-	wuy_hlist_iter(&c->priority_buckets[index], node) {
-		http2_priority_t *p = wuy_containerof(node, http2_priority_t, hash_node);
-		if (p->id == id) {
-			return p;
-		}
-	}
-	return NULL;
-}
-
-static http2_priority_t *http2_priority_search(http2_connection_t *c, uint32_t id)
-{
-	http2_priority_t *p = http2_priority_hash_search(c, id);
-	if (p != NULL) {
-		return p;
-	}
-
-	wuy_list_node_t *node;
-	wuy_list_iter(&c->priority_idle_head, node) {
-		http2_priority_t *p = wuy_containerof(node, http2_priority_t, idle_node);
-		if (p->id == id) {
-			return p;
-		}
-	}
-
-	return NULL;
-}
-
-static http2_stream_t *http2_stream_search(http2_connection_t *c, uint32_t id)
-{
-	http2_priority_t *p = http2_priority_hash_search(c, id);
-	if (p == NULL) {
-		return NULL;
-	}
-	return p->s;
-}
-static http2_stream_t *http2_stream_current(http2_connection_t *c)
-{
-	return http2_stream_search(c, c->frame.stream_id);
-}
-
-static http2_priority_t *http2_priority_new(http2_connection_t *c, uint32_t id)
-{
-	http2_priority_t *p = wuy_pool_alloc(http2_pool_priority);
-	if (p == NULL) {
-		return NULL;
-	}
-	bzero(p, sizeof(http2_priority_t));
-
-	p->id = id;
-	p->active = true;
-	http2_priority_hash_add(c, p);
-	wuy_list_node_init(&p->brother);
-	wuy_list_init(&p->children);
-	return p;
 }
 
 
@@ -601,7 +670,8 @@ static int http2_process_frame_window_update(http2_connection_t *c,
 static void http2_priority_update(http2_priority_t *p, http2_connection_t *c,
 		bool exclusive, uint32_t dependency, uint8_t weight)
 {
-	http2_log(c, "http2_priority_update %u on %u, weight=%d, exclusive=%d", p->id, dependency, weight, exclusive);
+	http2_log(c, "http2_priority_update %u on %u, weight=%d, exclusive=%d",
+			p->id, dependency, weight, exclusive);
 
 	p->exclusive = exclusive;
 	p->weight = weight;
@@ -610,15 +680,18 @@ static void http2_priority_update(http2_priority_t *p, http2_connection_t *c,
 	wuy_list_delete(&p->brother);
 
 	/* set to new relationship */
-	http2_priority_t *parent = http2_priority_search(c, dependency);
+	http2_priority_t *parent = http2_priority_hash_search(c, dependency);
 
-	wuy_list_t *children = (parent != NULL) ? &parent->children : &c->priority_root_children;
+	http2_priority_set_dependency(p, parent, c);
 
-	p->parent = parent;
-	if (exclusive) {
-		wuy_list_insert(children, &p->brother);
-	} else {
-		wuy_list_append(children, &p->brother);
+	/* update closed priority nodes */
+	p = p->parent;
+	while (p) {
+		if (p->s == NULL) {
+			wuy_list_delete(&p->closed_node);
+			wuy_list_insert(&c->priority_closed_lru, &p->closed_node);
+		}
+		p = p->parent;
 	}
 }
 
@@ -650,7 +723,7 @@ static int http2_process_frame_priority(http2_connection_t *c,
 	}
 
 	uint32_t id = c->frame.stream_id;
-	http2_priority_t *p = http2_priority_search(c, id);
+	http2_priority_t *p = http2_priority_hash_search(c, id);
 	if (p == NULL) {
 		if (id <= c->last_stream_id_in) { /* has been closed */
 			return length;
@@ -661,7 +734,7 @@ static int http2_process_frame_priority(http2_connection_t *c,
 			return length;
 		}
 
-		wuy_list_insert(&c->priority_idle_head, &p->idle_node);
+		wuy_list_insert(&c->priority_closed_lru, &p->closed_node);
 	}
 
 	http2_priority_update(p, c, exclusive, dependency, weight);
@@ -669,8 +742,7 @@ static int http2_process_frame_priority(http2_connection_t *c,
 }
 
 
-/* move stream from streams_in_request to x, if end */
-static void http2_stream_check_end(http2_stream_t *s, int proc_len)
+static void http2_stream_request_finish(http2_stream_t *s, int proc_len)
 {
 	http2_connection_t *c = s->c;
 
@@ -703,7 +775,7 @@ static int http2_process_frame_data(http2_connection_t *c,
 
 	http2_hook_stream_body(s, buffer, length);
 
-	http2_stream_check_end(s, length);
+	http2_stream_request_finish(s, length);
 
 	return length;
 }
@@ -750,9 +822,9 @@ static int http2_process_payload_headers(http2_stream_t *s,
 
 	int total_len = buf_pos - buffer + extra_len;
 
-	http2_stream_check_end(s, total_len);
+	http2_stream_request_finish(s, total_len);
 
-	s->c->frame.type = HTTP2_FRAME_HEADERS_REMAIN;
+	s->c->frame.type = HTTP2_FRAME_HEADERS_REMAINING;
 	return total_len;
 }
 
@@ -772,7 +844,7 @@ static int http2_process_frame_continuation(http2_connection_t *c,
 	return http2_process_payload_headers(s, buffer, length, 0);
 }
 
-static int http2_process_frame_headers_remain(http2_connection_t *c,
+static int http2_process_frame_headers_remaining(http2_connection_t *c,
 		const uint8_t *buffer, int length)
 {
 	http2_stream_t *s = http2_stream_current(c);
@@ -858,7 +930,7 @@ static http2_process_f *http2_frame_handlers[] = {
 	http2_process_frame_window_update,
 	http2_process_frame_continuation,
 	http2_process_frame_unknown,
-	http2_process_frame_headers_remain,
+	http2_process_frame_headers_remaining,
 	http2_process_preface,
 };
 
@@ -936,28 +1008,6 @@ int http2_process_input(http2_connection_t *c, const uint8_t *buf_pos, int buf_l
 
 	http2_log(c, "[debug] process end with total %d", buf_len - buf_left);
 	return buf_len - buf_left;
-}
-
-static http2_stream_t *http2_do_schedular(wuy_list_t *children)
-{
-	wuy_list_node_t *node;
-	wuy_list_iter(children, node) {
-		http2_priority_t *p = wuy_containerof(node, http2_priority_t, brother);
-		if (p->s != NULL && p->active) {
-			http2_log(p->s->c, "[debug] schedular pick stream: %u", p->id);
-			p->active = false;
-			return p->s;
-		}
-		http2_stream_t *s = http2_do_schedular(&p->children);
-		if (s != NULL) {
-			return s;
-		}
-	}
-	return NULL;
-}
-http2_stream_t *http2_schedular(http2_connection_t *c)
-{
-	return http2_do_schedular(&c->priority_root_children);
 }
 
 
