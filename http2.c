@@ -209,16 +209,36 @@ void http2_make_frame_body(http2_stream_t *s, uint8_t *frame_pos,
 	}
 	http2_build_frame_header(frame_pos, length, HTTP2_FRAME_DATA, flags, s->p->id);
 
-	/* re-schedular */
+	/* set active back */
 	s->p->active = true;
+
+	/* update all ancients' consumed */
 	float consumed = (float)length;
 	http2_priority_t *p;
 	for (p = s->p; p != NULL; p = p->parent) {
 		p->consumed += consumed / p->weight;
-		// TODO
+
+		if (p->exclusive) {
+			continue;
+		}
+
+		/* sort the non-exclusive priority in consumed order */
+		wuy_list_t *children = (p->parent != NULL) ? &p->parent->children
+				: &s->c->priority_root_children;
+		wuy_list_node_t *node;
+		wuy_list_iter_reverse(children, node) {
+			http2_priority_t *older = wuy_containerof(node, http2_priority_t, brother);
+			if (older == p) {
+				break;
+			}
+			if (older->exclusive || older->consumed <= p->consumed) {
+				wuy_list_delete(&p->brother);
+				wuy_list_add_after(&older->brother, &p->brother);
+				break;
+			}
+		}
 	}
 }
-
 
 static void http2_send_frame_ping(http2_connection_t *c, const uint8_t *ack)
 {

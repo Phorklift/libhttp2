@@ -2,6 +2,7 @@
 #define HTTP2_H
 
 #include <stdint.h>
+#include <stdbool.h>
 
 
 typedef struct http2_connection_s http2_connection_t;
