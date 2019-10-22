@@ -104,6 +104,7 @@ void connection_close(example_connection_t *c)
 }
 
 #define BUFFER_SIZE (16*4096)
+SSL_CTX *ctx;
 bool on_accept(loop_tcp_listen_t *tl, loop_stream_t *s, struct sockaddr *addr)
 {
 	printf("accept\n");
@@ -125,42 +126,21 @@ bool on_accept(loop_tcp_listen_t *tl, loop_stream_t *s, struct sockaddr *addr)
 	http2_connection_t *h2c = http2_connection_new(&settings);
 	http2_connection_set_app_data(h2c, c);
 	c->h2c = h2c;
+
+	/* set ssl */
+	SSL *ssl = SSL_new(ctx);
+	SSL_set_fd(ssl, loop_stream_fd(s));
+	SSL_set_accept_state(ssl);
+	loop_stream_set_ssl(s, ssl);
+
 	return true;
 }
-void exm_http2_hook_stream_new(http2_stream_t *s)
-{
-	/* create example_request_t */
-	example_request_t *r = wuy_pool_alloc(pool_request);
-
-	bzero(r, sizeof(example_request_t));
-	r->c = http2_connection_get_app_data(http2_stream_get_connection(s));
-	r->http2_stream = s;
-	printf("  = r %p %p\n", r->c, r->c->buffer);
-
-	http2_stream_set_app_data(s, r);
-}
-void exm_http2_hook_stream_header(http2_stream_t *s, const char *name_str,
-		int name_len, const char *value_str, int value_len)
-{
-	/* read request header :path only */
-	if (name_len == 5 && memcmp(name_str, ":path", 5) == 0) {
-		example_request_t *r = http2_stream_get_app_data(s);
-		r->path = malloc(value_len + 1);
-		memcpy(r->path, value_str, value_len);
-		r->path[value_len] = '\0';
-	}
-}
-void exm_http2_hook_stream_body(http2_stream_t *s, const uint8_t *buf, int len)
-{
-	/* ignore request body */
-}
-void exm_http2_hook_stream_end(http2_stream_t *s)
+bool process_request(example_request_t *r)
 {
 	/* request done, open local file with :path */
-	example_request_t *r = http2_stream_get_app_data(s);
 	if (r->path == NULL) {
 		printf("no path\n");
-		return;
+		return false;
 	}
 
 	char path[1024];
@@ -176,12 +156,45 @@ void exm_http2_hook_stream_end(http2_stream_t *s)
 	} else {
 		r->content_length = 0;
 	}
+	return true;
 }
-void exm_http2_hook_control_frame(http2_connection_t *h2c, const uint8_t *buf, int len)
+bool exm_http2_hook_stream_header(http2_stream_t *s, const char *name_str,
+		int name_len, const char *value_str, int value_len)
+{
+	example_request_t *r = http2_stream_get_app_data(s);
+	if (r == NULL) { /* first header, create request */
+		r = wuy_pool_alloc(pool_request);
+		bzero(r, sizeof(example_request_t));
+		r->c = http2_connection_get_app_data(http2_stream_get_connection(s));
+		r->http2_stream = s;
+		printf("  = r %p %p\n", r->c, r->c->buffer);
+		http2_stream_set_app_data(s, r);
+	}
+
+	if (name_str == NULL) { /* end of headers */
+		return process_request(r);
+	}
+
+	/* read request header :path only */
+	if (name_len == 5 && memcmp(name_str, ":path", 5) == 0) {
+		r->path = malloc(value_len + 1);
+		memcpy(r->path, value_str, value_len);
+		r->path[value_len] = '\0';
+	}
+
+	return true;
+}
+bool exm_http2_hook_stream_body(http2_stream_t *s, const uint8_t *buf, int len)
+{
+	/* ignore request body */
+	return true;
+}
+bool exm_http2_hook_control_frame(http2_connection_t *h2c, const uint8_t *buf, int len)
 {
 	example_connection_t *c = http2_connection_get_app_data(h2c);
 	memcpy(c->buf_end, buf, len);
 	c->buf_end += len;
+	return true;
 }
 
 
@@ -234,12 +247,13 @@ void response(example_request_t *r)
 	}
 
 	uint8_t *buf_pos = r->c->buf_end;
-	uint8_t *buf_end = r->c->buffer + BUFFER_SIZE;
+	// uint8_t *buf_end = r->c->buffer + BUFFER_SIZE;
 
 	uint8_t *frame = buf_pos;
 	buf_pos += HTTP2_FRAME_HEADER_SIZE;
 
-	ssize_t read_len = fread(buf_pos, 1, buf_end - buf_pos, r->fp);
+	// ssize_t read_len = fread(buf_pos, 1, buf_end - buf_pos, r->fp);
+	ssize_t read_len = fread(buf_pos, 1, 50, r->fp);
 	r->response_length += read_len;
 	buf_pos += read_len;
 	r->c->buf_end = buf_pos;
@@ -255,7 +269,7 @@ void response(example_request_t *r)
 	}
 }
 
-ssize_t on_read(loop_stream_t *s, void *data, size_t len)
+int on_read(loop_stream_t *s, void *data, int len)
 {
 	example_connection_t *c = loop_stream_get_app_data(s);
 
@@ -304,9 +318,8 @@ void exm_http2_hook_log(http2_connection_t *h2c, const char *fmt, ...)
 int main()
 {
 	/* library init */
-	http2_library_init(exm_http2_hook_stream_new, exm_http2_hook_stream_header,
-			exm_http2_hook_stream_body, exm_http2_hook_stream_end, NULL,
-			exm_http2_hook_control_frame, exm_http2_hook_log);
+	http2_library_init(exm_http2_hook_stream_header, exm_http2_hook_stream_body, NULL,
+			exm_http2_hook_control_frame);
 
 	SSL_load_error_strings();	
 	OpenSSL_add_ssl_algorithms();
@@ -314,7 +327,7 @@ int main()
 	signal(SIGPIPE, SIG_IGN); /* for network */
 
 	/* example init */
-	SSL_CTX *ctx = SSL_CTX_new(SSLv23_server_method());
+	ctx = SSL_CTX_new(SSLv23_server_method());
 	SSL_CTX_set_ecdh_auto(ctx, 1);
 	SSL_CTX_use_certificate_file(ctx, "cert.pem", SSL_FILETYPE_PEM);
 	SSL_CTX_use_PrivateKey_file(ctx, "key.pem", SSL_FILETYPE_PEM);
@@ -325,7 +338,7 @@ int main()
 
 	/* run loop */
 	loop_tcp_listen_ops_t listen_ops = { .on_accept = on_accept };
-	loop_stream_ops_t stream_ops = { .on_read = on_read, .on_close = on_close, .ssl_ctx = ctx };
+	loop_stream_ops_t stream_ops = { .on_read = on_read, .on_close = on_close };
 	loop_t *loop = loop_new();
 	loop_tcp_listen(loop, "1234", &listen_ops, &stream_ops);
 	loop_run(loop);

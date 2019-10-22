@@ -135,13 +135,14 @@ enum http2_error_code {
 };
 
 
-static http2_hook_stream_new_f http2_hook_stream_new;
-static http2_hook_stream_header_f http2_hook_stream_header;
-static http2_hook_stream_body_f http2_hook_stream_body;
-static http2_hook_stream_end_f http2_hook_stream_end;
-static http2_hook_stream_reset_f http2_hook_stream_reset;
-static http2_hook_control_frame_f http2_hook_control_frame;
-static http2_hook_log_f http2_hook_log;
+static bool (*http2_hook_stream_header)(http2_stream_t *, const char *name_str,
+			int name_len, const char *value_str, int value_len);
+static bool (*http2_hook_stream_body)(http2_stream_t *, const uint8_t *buf, int len);
+static void (*http2_hook_stream_reset)(http2_stream_t *);
+static bool (*http2_hook_control_frame)(http2_connection_t *, const uint8_t *buf, int len);
+
+static void (*http2_hook_log)(http2_connection_t *, const char *fmt, ...);
+
 
 #define http2_log(c, fmt, ...) \
 	if (http2_hook_log != NULL) http2_hook_log(c, fmt, ##__VA_ARGS__)
@@ -457,7 +458,6 @@ static http2_stream_t *http2_stream_new(http2_connection_t *c)
 	c->stream_num++;
 	c->last_stream_id_in = c->frame.stream_id;
 
-	http2_hook_stream_new(s);
 	return s;
 }
 
@@ -762,25 +762,6 @@ static int http2_process_frame_priority(http2_connection_t *c,
 }
 
 
-static void http2_stream_request_finish(http2_stream_t *s, int proc_len)
-{
-	http2_connection_t *c = s->c;
-
-	if (!(c->frame.flags & HTTP2_FLAG_END_STREAM)) {
-		http2_log(c, "stream %u request not end for flags", s->p->id);
-		return;
-	}
-	if (c->frame.left != proc_len) {
-		http2_log(c, "stream %u request not end for length: %d %d",
-				s->p->id, c->frame.left, proc_len);
-		return;
-	}
-
-	http2_log(c, "stream %u request end", s->p->id);
-
-	http2_hook_stream_end(s);
-}
-
 static int http2_process_frame_data(http2_connection_t *c,
 		const uint8_t *buffer, int length)
 {
@@ -795,7 +776,10 @@ static int http2_process_frame_data(http2_connection_t *c,
 
 	http2_hook_stream_body(s, buffer, length);
 
-	http2_stream_request_finish(s, length);
+	/* check end_stream */
+	if (length == s->c->frame.left && s->end_stream) {
+		http2_hook_stream_body(s, NULL, 0);
+	}
 
 	return length;
 }
@@ -842,7 +826,11 @@ static int http2_process_payload_headers(http2_stream_t *s,
 
 	int total_len = buf_pos - buffer + extra_len;
 
-	http2_stream_request_finish(s, total_len);
+	/* check end_headers and end_stream */
+	if (total_len == s->c->frame.left && s->end_headers) {
+		/* @name_len argument is used to info end_stream */
+		http2_hook_stream_header(s, NULL, s->end_stream, NULL, 0);
+	}
 
 	s->c->frame.type = HTTP2_FRAME_HEADERS_REMAINING;
 	return total_len;
@@ -1063,11 +1051,11 @@ uint32_t http2_stream_get_send_window(http2_stream_t *s)
 	return MIN(s->send_window, s->c->send_window);
 }
 
-
-void http2_library_init(http2_hook_stream_new_f stream_new, http2_hook_stream_header_f stream_header,
-		http2_hook_stream_body_f stream_body, http2_hook_stream_end_f stream_end,
-		http2_hook_stream_reset_f stream_reset, http2_hook_control_frame_f control_frame,
-		http2_hook_log_f log)
+void http2_library_init(bool (*stream_header)(http2_stream_t *, const char *name_str,
+			int name_len, const char *value_str, int value_len),
+		bool (*stream_body)(http2_stream_t *, const uint8_t *buf, int len),
+		void (*stream_reset)(http2_stream_t *),
+		bool (*control_frame)(http2_connection_t *, const uint8_t *buf, int len))
 {
 	hpack_library_init(true);
 
@@ -1075,11 +1063,13 @@ void http2_library_init(http2_hook_stream_new_f stream_new, http2_hook_stream_he
 	http2_pool_stream = wuy_pool_new_type(http2_stream_t);
 	http2_pool_priority = wuy_pool_new_type(http2_priority_t);
 
-	http2_hook_stream_new = stream_new;
 	http2_hook_stream_header = stream_header;
 	http2_hook_stream_body = stream_body;
-	http2_hook_stream_end = stream_end;
 	http2_hook_stream_reset = stream_reset;
 	http2_hook_control_frame = control_frame;
+}
+
+void http2_set_log(void (*log)(http2_connection_t *, const char *fmt, ...))
+{
 	http2_hook_log = log;
 }
