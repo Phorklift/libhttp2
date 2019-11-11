@@ -138,7 +138,8 @@ enum http2_error_code {
 static bool (*http2_hook_stream_header)(http2_stream_t *, const char *name_str,
 			int name_len, const char *value_str, int value_len);
 static bool (*http2_hook_stream_body)(http2_stream_t *, const uint8_t *buf, int len);
-static void (*http2_hook_stream_reset)(http2_stream_t *);
+static void (*http2_hook_stream_close)(http2_stream_t *);
+static bool (*http2_hook_stream_response)(http2_stream_t *, int window);
 static bool (*http2_hook_control_frame)(http2_connection_t *, const uint8_t *buf, int len);
 
 static void (*http2_hook_log)(http2_connection_t *, const char *fmt, ...);
@@ -201,6 +202,10 @@ void http2_make_frame_headers(http2_stream_t *s, uint8_t *frame_pos,
 	http2_build_frame_header(frame_pos, length, HTTP2_FRAME_HEADERS, flags, s->p->id);
 }
 
+void http2_stream_active_tmp(http2_stream_t *s)
+{
+	s->p->active = true;
+}
 void http2_make_frame_body(http2_stream_t *s, uint8_t *frame_pos,
 		int length, bool is_stream_end)
 {
@@ -404,7 +409,7 @@ static void http2_priority_close(http2_priority_t *p)
 	wuy_pool_free(p);
 }
 
-static http2_stream_t *http2_do_schedular(wuy_list_t *children)
+static void http2_do_schedular(wuy_list_t *children)
 {
 	wuy_list_node_t *node;
 	wuy_list_iter(children, node) {
@@ -416,20 +421,20 @@ static http2_stream_t *http2_do_schedular(wuy_list_t *children)
 			 * We will active it later in http2_make_frame_body() if still active. */
 			p->active = false;
 
-			return p->s;
+			if (!http2_hook_stream_response(p->s, 0)) {
+				return;
+			}
 		}
 
 		/* search an active stream from its children */
-		http2_stream_t *s = http2_do_schedular(&p->children);
-		if (s != NULL) {
-			return s;
-		}
+		http2_do_schedular(&p->children);
 	}
-	return NULL;
 }
-http2_stream_t *http2_schedular(http2_connection_t *c)
+void http2_schedular(http2_connection_t *c)
 {
-	return http2_do_schedular(&c->priority_root_children);
+	http2_log(c, "~~~ start http2_schedular");
+	http2_do_schedular(&c->priority_root_children);
+	http2_log(c, "~~~ end of http2_schedular");
 }
 
 
@@ -528,7 +533,7 @@ void http2_connection_close(http2_connection_t *c)
 			http2_priority_t *p = wuy_containerof(node, http2_priority_t, hash_node);
 			if (p->s != NULL) {
 				/* http2_stream_close() is expected to be called in the hook */
-				http2_hook_stream_reset(p->s);
+				http2_hook_stream_close(p->s);
 			}
 		}
 	}
@@ -1054,7 +1059,8 @@ uint32_t http2_stream_get_send_window(http2_stream_t *s)
 void http2_library_init(bool (*stream_header)(http2_stream_t *, const char *name_str,
 			int name_len, const char *value_str, int value_len),
 		bool (*stream_body)(http2_stream_t *, const uint8_t *buf, int len),
-		void (*stream_reset)(http2_stream_t *),
+		void (*stream_close)(http2_stream_t *),
+		bool (*stream_response)(http2_stream_t *, int window),
 		bool (*control_frame)(http2_connection_t *, const uint8_t *buf, int len))
 {
 	hpack_library_init(true);
@@ -1065,7 +1071,8 @@ void http2_library_init(bool (*stream_header)(http2_stream_t *, const char *name
 
 	http2_hook_stream_header = stream_header;
 	http2_hook_stream_body = stream_body;
-	http2_hook_stream_reset = stream_reset;
+	http2_hook_stream_close = stream_close;
+	http2_hook_stream_response = stream_response;
 	http2_hook_control_frame = control_frame;
 }
 
