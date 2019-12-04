@@ -1,0 +1,3 @@
+[submodule "libhpack"]
+	path = libhpack
+	url = https://github.com/h2tpd/libhpack.git
