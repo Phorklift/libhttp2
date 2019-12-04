@@ -23,7 +23,8 @@ typedef struct {
 void http2_library_init(bool (*stream_header)(http2_stream_t *, const char *name_str,
 			int name_len, const char *value_str, int value_len),
 		bool (*stream_body)(http2_stream_t *, const uint8_t *buf, int len),
-		void (*stream_reset)(http2_stream_t *),
+		void (*stream_close)(http2_stream_t *),
+		bool (*stream_response)(http2_stream_t *, int window),
 		bool (*control_frame)(http2_connection_t *, const uint8_t *buf, int len));
 
 void http2_set_log(void (*log)(http2_connection_t *, const char *fmt, ...));
@@ -37,7 +38,7 @@ void *http2_connection_get_app_data(http2_connection_t *c);
 
 int http2_process_input(http2_connection_t *c, const uint8_t *buf_pos, int buf_len);
 
-http2_stream_t *http2_schedular(http2_connection_t *c);
+void http2_schedular(http2_connection_t *c);
 
 int http2_connection_idle_time(http2_connection_t *c);
 

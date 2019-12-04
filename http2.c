@@ -215,8 +215,15 @@ void http2_make_frame_body(http2_stream_t *s, uint8_t *frame_pos,
 	}
 	http2_build_frame_header(frame_pos, length, HTTP2_FRAME_DATA, flags, s->p->id);
 
+	if (length == 0) {
+		return;
+	}
+
 	/* set active back */
 	s->p->active = true;
+
+	s->send_window -= length;
+	s->c->send_window -= length;
 
 	/* update all ancients' consumed */
 	float consumed = (float)length;
@@ -409,10 +416,12 @@ static void http2_priority_close(http2_priority_t *p)
 	wuy_pool_free(p);
 }
 
-static void http2_do_schedular(wuy_list_t *children)
+static int http2_do_schedular(wuy_list_t *children)
 {
-	wuy_list_node_t *node;
-	wuy_list_iter(children, node) {
+	int actives = 0;
+
+	wuy_list_node_t *node, *safe;
+	wuy_list_iter_safe(children, node, safe) {
 		http2_priority_t *p = wuy_containerof(node, http2_priority_t, brother);
 		if (p->s != NULL && p->active) {
 			http2_log(p->s->c, "[debug] schedular pick stream: %u", p->id);
@@ -422,18 +431,28 @@ static void http2_do_schedular(wuy_list_t *children)
 			p->active = false;
 
 			if (!http2_hook_stream_response(p->s, 0)) {
-				return;
+				return -1;
+			}
+
+			if (p->s != NULL && p->active) {
+				actives++;
 			}
 		}
 
 		/* search an active stream from its children */
-		http2_do_schedular(&p->children);
+		int ret = http2_do_schedular(&p->children);
+		if (ret == -1) {
+			return -1;
+		}
+		actives += ret;
 	}
+	return actives;
 }
 void http2_schedular(http2_connection_t *c)
 {
 	http2_log(c, "~~~ start http2_schedular");
-	http2_do_schedular(&c->priority_root_children);
+	while (http2_do_schedular(&c->priority_root_children) > 0)
+		printf("http2_schedular again\n"); // do nothing
 	http2_log(c, "~~~ end of http2_schedular");
 }
 
