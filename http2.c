@@ -801,7 +801,8 @@ static int http2_process_frame_data(http2_connection_t *c,
 	http2_hook_stream_body(s, buffer, length);
 
 	/* check end_stream */
-	if (length == s->c->frame.left && s->end_stream) {
+	if (length == s->c->frame.left && (c->frame.flags & HTTP2_FLAG_END_STREAM)) {
+		s->end_stream = true;
 		http2_hook_stream_body(s, NULL, 0);
 	}
 
