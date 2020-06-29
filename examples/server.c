@@ -14,7 +14,6 @@
 
 #include "loop.h"
 #include "http2.h"
-#include "wuy_pool.h"
 
 typedef struct {
 	loop_stream_t		*loop_stream;
@@ -37,9 +36,6 @@ typedef struct {
 	bool			response_headers;
 } example_request_t;
 
-
-static wuy_pool_t *pool_connection;
-static wuy_pool_t *pool_request;
 
 static inline void display_char(const uint8_t *p, int len)
 {
@@ -100,7 +96,7 @@ void connection_close(example_connection_t *c)
 	c->buf_end = c->buf_start = c->buffer;
 
 	loop_stream_close(c->loop_stream);
-	wuy_pool_free(c);
+	free(c);
 }
 
 #define BUFFER_SIZE (16*4096)
@@ -110,7 +106,7 @@ bool on_accept(loop_tcp_listen_t *tl, loop_stream_t *s, struct sockaddr *addr)
 	printf("accept\n");
 
 	/* create example_connection_t */
-	example_connection_t *c = wuy_pool_alloc(pool_connection);
+	example_connection_t *c = malloc(sizeof(example_connection_t));
 	c->buffer = malloc(BUFFER_SIZE);
 	c->buf_start = c->buf_end = c->buffer;
 	printf("  = c %p %p\n", c, c->buffer);
@@ -131,7 +127,7 @@ bool on_accept(loop_tcp_listen_t *tl, loop_stream_t *s, struct sockaddr *addr)
 	SSL *ssl = SSL_new(ctx);
 	SSL_set_fd(ssl, loop_stream_fd(s));
 	SSL_set_accept_state(ssl);
-	loop_stream_set_ssl(s, ssl);
+	loop_stream_set_underlying(s, ssl);
 
 	return true;
 }
@@ -158,57 +154,6 @@ bool process_request(example_request_t *r)
 	}
 	return true;
 }
-bool exm_http2_hook_stream_header(http2_stream_t *s, const char *name_str,
-		int name_len, const char *value_str, int value_len)
-{
-	example_request_t *r = http2_stream_get_app_data(s);
-	if (r == NULL) { /* first header, create request */
-		r = wuy_pool_alloc(pool_request);
-		bzero(r, sizeof(example_request_t));
-		r->c = http2_connection_get_app_data(http2_stream_get_connection(s));
-		r->http2_stream = s;
-		printf("  = r %p %p\n", r->c, r->c->buffer);
-		http2_stream_set_app_data(s, r);
-	}
-
-	if (name_str == NULL) { /* end of headers */
-		return process_request(r);
-	}
-
-	/* read request header :path only */
-	if (name_len == 5 && memcmp(name_str, ":path", 5) == 0) {
-		r->path = malloc(value_len + 1);
-		memcpy(r->path, value_str, value_len);
-		r->path[value_len] = '\0';
-	}
-
-	return true;
-}
-bool exm_http2_hook_stream_body(http2_stream_t *s, const uint8_t *buf, int len)
-{
-	/* ignore request body */
-	return true;
-}
-bool exm_http2_hook_control_frame(http2_connection_t *h2c, const uint8_t *buf, int len)
-{
-	example_connection_t *c = http2_connection_get_app_data(h2c);
-	memcpy(c->buf_end, buf, len);
-	c->buf_end += len;
-	return true;
-}
-
-
-void request_close(example_request_t *r)
-{
-	http2_stream_close(r->http2_stream);
-	if (r->fp != NULL) {
-		fclose(r->fp);
-	}
-	if (r->path != NULL) {
-		free(r->path);
-	}
-	wuy_pool_free(r);
-}
 
 void response_headers(example_request_t *r, int status_code)
 {
@@ -234,12 +179,56 @@ void response_headers(example_request_t *r, int status_code)
 	r->c->buf_end = buf_pos;
 }
 
-void response(example_request_t *r)
+void request_close(example_request_t *r)
 {
+	http2_stream_close(r->http2_stream);
+	if (r->fp != NULL) {
+		fclose(r->fp);
+	}
+	if (r->path != NULL) {
+		free(r->path);
+	}
+	free(r);
+}
+
+bool exm_http2_hook_stream_header(http2_stream_t *s, const char *name_str,
+		int name_len, const char *value_str, int value_len)
+{
+	example_request_t *r = http2_stream_get_app_data(s);
+	if (r == NULL) { /* first header, create request */
+		r = malloc(sizeof(example_request_t));
+		bzero(r, sizeof(example_request_t));
+		r->c = http2_connection_get_app_data(http2_stream_get_connection(s));
+		r->http2_stream = s;
+		printf("  = r %p %p\n", r->c, r->c->buffer);
+		http2_stream_set_app_data(s, r);
+	}
+
+	if (name_str == NULL) { /* end of headers */
+		return process_request(r);
+	}
+
+	/* read request header :path only */
+	if (name_len == 5 && memcmp(name_str, ":path", 5) == 0) {
+		r->path = malloc(value_len + 1);
+		memcpy(r->path, value_str, value_len);
+		r->path[value_len] = '\0';
+	}
+
+	return true;
+}
+bool exm_http2_hook_stream_body(http2_stream_t *s, const uint8_t *buf, int len)
+{
+	/* ignore request body */
+	return true;
+}
+bool exm_http2_hook_stream_response(http2_stream_t *s, int window)
+{
+	example_request_t *r = http2_stream_get_app_data(s);
 	if (r->fp == NULL) {
 		response_headers(r, 404);
 		request_close(r);
-		return;
+		return false;
 	}
 
 	if (!r->response_headers) {
@@ -267,7 +256,17 @@ void response(example_request_t *r)
 	if (is_done) {
 		request_close(r);
 	}
+	return true;
 }
+
+bool exm_http2_hook_control_frame(http2_connection_t *h2c, const uint8_t *buf, int len)
+{
+	example_connection_t *c = http2_connection_get_app_data(h2c);
+	memcpy(c->buf_end, buf, len);
+	c->buf_end += len;
+	return true;
+}
+
 
 int on_read(loop_stream_t *s, void *data, int len)
 {
@@ -279,10 +278,7 @@ int on_read(loop_stream_t *s, void *data, int len)
 		return -1;
 	}
 
-	http2_stream_t *h2s;
-	while ((h2s = http2_schedular(c->h2c)) != NULL) {
-		response(http2_stream_get_app_data(h2s));
-	}
+	http2_schedular(c->h2c);
 
 	if (c->buf_end > c->buf_start) {
 		printf("send: %ld %p %p\n", c->buf_end - c->buf_start, c->buffer, c->buf_start);
@@ -315,10 +311,15 @@ void exm_http2_hook_log(http2_connection_t *h2c, const char *fmt, ...)
 	printf("%ld.%06ld [HTTP2] %s\n", now.tv_sec, now.tv_usec, buffer);
 }
 
+#include "../../libloop/examples/ssl_underlying.c"
+
 int main()
 {
 	/* library init */
-	http2_library_init(exm_http2_hook_stream_header, exm_http2_hook_stream_body, NULL,
+	http2_library_init(exm_http2_hook_stream_header,
+			exm_http2_hook_stream_body,
+			NULL,
+			exm_http2_hook_stream_response,
 			exm_http2_hook_control_frame);
 
 	SSL_load_error_strings();	
@@ -333,12 +334,15 @@ int main()
 	SSL_CTX_use_PrivateKey_file(ctx, "key.pem", SSL_FILETYPE_PEM);
 	SSL_CTX_set_alpn_select_cb(ctx, ssl_alpn_callback, NULL);
 
-	pool_connection = wuy_pool_new_type(example_connection_t);
-	pool_request = wuy_pool_new_type(example_request_t);
-
 	/* run loop */
 	loop_tcp_listen_ops_t listen_ops = { .on_accept = on_accept };
-	loop_stream_ops_t stream_ops = { .on_read = on_read, .on_close = on_close };
+	loop_stream_ops_t stream_ops = {
+		.on_read = on_read,
+		.on_close = on_close,
+		.underlying_read = ssl_underlying_read,
+		.underlying_write = ssl_underlying_write,
+		.underlying_close = ssl_underlying_close,
+	};
 	loop_t *loop = loop_new();
 	loop_tcp_listen(loop, "1234", &listen_ops, &stream_ops);
 	loop_run(loop);

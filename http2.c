@@ -1,9 +1,9 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
+#include <stdlib.h>
 
 #include "hpack.h"
-#include "wuy_pool.h"
 #include "wuy_list.h"
 #include "wuy_hlist.h"
 
@@ -89,11 +89,7 @@ struct http2_stream_s {
 };
 
 
-
-static wuy_pool_t *http2_pool_connection;
-static wuy_pool_t *http2_pool_stream;
-static wuy_pool_t *http2_pool_priority;
-static WUY_LIST(http2_active_connection);
+static WUY_LIST(http2_active_connection); // TODO
 
 enum http2_frame_type {
 	HTTP2_FRAME_DATA = 0x0,
@@ -373,7 +369,7 @@ static void http2_priority_set_dependency(http2_priority_t *p,
 
 static http2_priority_t *http2_priority_new(http2_connection_t *c, uint32_t id)
 {
-	http2_priority_t *p = wuy_pool_alloc(http2_pool_priority);
+	http2_priority_t *p = malloc(sizeof(http2_priority_t));
 	if (p == NULL) {
 		return NULL;
 	}
@@ -413,7 +409,7 @@ static void http2_priority_close(http2_priority_t *p)
 		http2_priority_set_dependency(pc, p->parent, c);
 	}
 
-	wuy_pool_free(p);
+	free(p);
 }
 
 static int http2_do_schedular(wuy_list_t *children)
@@ -463,7 +459,7 @@ static http2_stream_t *http2_stream_new(http2_connection_t *c)
 {
 	http2_log(c, "new stream: %u", c->frame.stream_id);
 
-	http2_stream_t *s = wuy_pool_alloc(http2_pool_stream);
+	http2_stream_t *s = malloc(sizeof(http2_stream_t));
 	if (s == NULL) {
 		return NULL;
 	}
@@ -493,7 +489,7 @@ void http2_stream_close(http2_stream_t *s)
 
 	http2_priority_close(s->p);
 
-	wuy_pool_free(s);
+	free(s);
 }
 
 static http2_stream_t *http2_stream_current(http2_connection_t *c)
@@ -510,7 +506,7 @@ static http2_stream_t *http2_stream_current(http2_connection_t *c)
 
 http2_connection_t *http2_connection_new(const http2_settings_t *settings)
 {
-	http2_connection_t *c = wuy_pool_alloc(http2_pool_connection);
+	http2_connection_t *c = malloc(sizeof(http2_connection_t));
 	if (c == NULL) {
 		return NULL;
 	}
@@ -560,10 +556,10 @@ void http2_connection_close(http2_connection_t *c)
 	wuy_list_node_t *node, *safe;
 	wuy_list_iter_safe(&c->priority_closed_lru, node, safe) {
 		http2_priority_t *p = wuy_containerof(node, http2_priority_t, closed_node);
-		wuy_pool_free(p);
+		free(p);
 	}
 
-	wuy_pool_free(c);
+	free(c);
 }
 
 
@@ -1084,10 +1080,6 @@ void http2_library_init(bool (*stream_header)(http2_stream_t *, const char *name
 		bool (*control_frame)(http2_connection_t *, const uint8_t *buf, int len))
 {
 	hpack_library_init(true);
-
-	http2_pool_connection = wuy_pool_new_type(http2_connection_t);
-	http2_pool_stream = wuy_pool_new_type(http2_stream_t);
-	http2_pool_priority = wuy_pool_new_type(http2_priority_t);
 
 	http2_hook_stream_header = stream_header;
 	http2_hook_stream_body = stream_body;

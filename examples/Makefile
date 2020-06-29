@@ -1,12 +1,12 @@
 CFLAGS = -g -Wall -O2
 CFLAGS += -I../
 CFLAGS += -I../../libloop/
-CFLAGS += -I../../libhpack/
 CFLAGS += -I../../libwuya/
+CFLAGS += -I../libhpack/
 LDFLAGS += -L../
 LDFLAGS += -L../../libloop/
-LDFLAGS += -L../../libhpack/
 LDFLAGS += -L../../libwuya/
+LDFLAGS += -L../libhpack/
 LDLIBS = -lhttp2 -lloop -lwuya -lssl -lhpack -lcrypto
 
 
