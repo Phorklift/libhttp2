@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <assert.h>
 #include <string.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -383,29 +384,30 @@ static void http2_priority_close(http2_priority_t *p)
 {
 	http2_connection_t *c = p->s->c;
 
+	assert(p->s != NULL);
 	p->s = NULL;
 
+	c->priority_closed_num++;
 	wuy_list_insert(&c->priority_closed_lru, &p->closed_node);
+}
 
-	if (c->priority_closed_num < 20) {
-		c->priority_closed_num++;
-		return;
+static void http2_priority_clean(http2_connection_t *c)
+{
+	while (c->priority_closed_num --> 20) {
+		wuy_list_node_t *node = wuy_list_last(&c->priority_closed_lru);
+		http2_priority_t *p = wuy_containerof(node, http2_priority_t, closed_node);
+		wuy_list_delete(node);
+		wuy_list_delete(&p->brother);
+		http2_priority_hash_delete(p);
+
+		wuy_list_node_t *safe;
+		wuy_list_iter_safe(&p->children, node, safe) {
+			http2_priority_t *pc = wuy_containerof(node, http2_priority_t, brother);
+			http2_priority_set_dependency(pc, p->parent, c);
+		}
+
+		free(p);
 	}
-
-	/* delete the last one */
-	wuy_list_node_t *node = wuy_list_last(&c->priority_closed_lru);
-	p = wuy_containerof(node, http2_priority_t, closed_node);
-	wuy_list_delete(node);
-	wuy_list_delete(&p->brother);
-	http2_priority_hash_delete(p);
-
-	wuy_list_node_t *safe;
-	wuy_list_iter_safe(&p->children, node, safe) {
-		http2_priority_t *pc = wuy_containerof(node, http2_priority_t, brother);
-		http2_priority_set_dependency(pc, p->parent, c);
-	}
-
-	free(p);
 }
 
 static int http2_do_schedular(wuy_list_t *children)
@@ -446,6 +448,8 @@ void http2_schedular(http2_connection_t *c)
 	while (http2_do_schedular(&c->priority_root_children) > 0)
 		printf("http2_schedular again\n"); // do nothing
 	http2_log(c, "~~~ end of http2_schedular");
+
+	http2_priority_clean(c);
 }
 
 
@@ -1073,8 +1077,6 @@ void http2_library_init(bool (*stream_header)(http2_stream_t *, const char *name
 		bool (*stream_response)(http2_stream_t *, int window),
 		bool (*control_frame)(http2_connection_t *, const uint8_t *buf, int len))
 {
-	hpack_library_init(true);
-
 	http2_hook_stream_header = stream_header;
 	http2_hook_stream_body = stream_body;
 	http2_hook_stream_close = stream_close;
