@@ -12,8 +12,6 @@
 
 struct http2_connection_s {
 
-	wuy_list_node_t		list_node;
-
 #define HTTP2_BUCKET_SIZE	8
 	/* all priority nodes (include open and closed) are indexed here for searching */
 	wuy_hlist_head_t	priority_buckets[HTTP2_BUCKET_SIZE];
@@ -88,8 +86,6 @@ struct http2_stream_s {
 	void			*app_data;
 };
 
-
-static WUY_LIST(http2_active_connection); // TODO
 
 enum http2_frame_type {
 	HTTP2_FRAME_DATA = 0x0,
@@ -527,8 +523,6 @@ http2_connection_t *http2_connection_new(const http2_settings_t *settings)
 	for (i = 0; i < HTTP2_BUCKET_SIZE; i++) {
 		wuy_hlist_head_init(&c->priority_buckets[i]);
 	}
-
-	wuy_list_append(&http2_active_connection, &c->list_node);
 
 	return c;
 }
