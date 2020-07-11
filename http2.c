@@ -231,9 +231,9 @@ void http2_make_frame_body(http2_stream_t *s, uint8_t *frame_pos,
 		/* sort the non-exclusive priority in consumed order */
 		wuy_list_t *children = (p->parent != NULL) ? &p->parent->children
 				: &s->c->priority_root_children;
-		wuy_list_node_t *node;
-		wuy_list_iter_reverse(children, node) {
-			http2_priority_t *older = wuy_containerof(node, http2_priority_t, brother);
+
+		http2_priority_t *older;
+		wuy_list_iter_reverse_type(children, older, brother) {
 			if (older == p) {
 				break;
 			}
@@ -337,9 +337,8 @@ static void http2_priority_hash_delete(http2_priority_t *p)
 static http2_priority_t *http2_priority_hash_search(http2_connection_t *c, uint32_t id)
 {
 	uint32_t index = http2_priority_hash_index(id);
-	wuy_hlist_node_t *node;
-	wuy_hlist_iter(&c->priority_buckets[index], node) {
-		http2_priority_t *p = wuy_containerof(node, http2_priority_t, hash_node);
+	http2_priority_t *p;
+	wuy_hlist_iter_type(&c->priority_buckets[index], p, hash_node) {
 		if (p->id == id) {
 			return p;
 		}
@@ -388,35 +387,39 @@ static void http2_priority_close(http2_priority_t *p)
 	p->s = NULL;
 
 	c->priority_closed_num++;
-	wuy_list_insert(&c->priority_closed_lru, &p->closed_node);
+	wuy_list_append(&c->priority_closed_lru, &p->closed_node);
 }
 
 static void http2_priority_clean(http2_connection_t *c)
 {
-	while (c->priority_closed_num --> 20) {
-		wuy_list_node_t *node = wuy_list_last(&c->priority_closed_lru);
-		http2_priority_t *p = wuy_containerof(node, http2_priority_t, closed_node);
-		wuy_list_delete(node);
-		wuy_list_delete(&p->brother);
-		http2_priority_hash_delete(p);
-
-		wuy_list_node_t *safe;
-		wuy_list_iter_safe(&p->children, node, safe) {
-			http2_priority_t *pc = wuy_containerof(node, http2_priority_t, brother);
-			http2_priority_set_dependency(pc, p->parent, c);
-		}
-
-		free(p);
+	if (c->priority_closed_num <= 20) {
+		return;
 	}
+	c->priority_closed_num--;
+
+	http2_priority_t *p;
+	wuy_list_pop_type(&c->priority_closed_lru, p, closed_node);
+	assert(p != NULL);
+
+	wuy_list_delete(&p->brother);
+	http2_priority_hash_delete(p);
+
+	http2_priority_t *pc;
+	while (wuy_list_pop_type(&p->children, pc, brother)) {
+		http2_priority_set_dependency(pc, p->parent, c);
+	}
+
+	free(p);
+
+	http2_priority_clean(c);
 }
 
 static int http2_do_schedular(wuy_list_t *children)
 {
 	int actives = 0;
 
-	wuy_list_node_t *node, *safe;
-	wuy_list_iter_safe(children, node, safe) {
-		http2_priority_t *p = wuy_containerof(node, http2_priority_t, brother);
+	http2_priority_t *p, *safe;
+	wuy_list_iter_safe_type(children, p, safe, brother) {
 		if (p->s != NULL && p->active) {
 			http2_log(p->s->c, "[debug] schedular pick stream: %u", p->id);
 
@@ -541,9 +544,8 @@ void http2_connection_close(http2_connection_t *c)
 
 	int i;
 	for (i = 0; i < HTTP2_BUCKET_SIZE; i++) {
-		wuy_hlist_node_t *node, *safe;
-		wuy_hlist_iter_safe(&c->priority_buckets[i], node, safe) {
-			http2_priority_t *p = wuy_containerof(node, http2_priority_t, hash_node);
+		http2_priority_t *p;
+		wuy_hlist_iter_type(&c->priority_buckets[i], p, hash_node) {
 			if (p->s != NULL) {
 				/* http2_stream_close() is expected to be called in the hook */
 				http2_hook_stream_close(p->s);
@@ -551,9 +553,8 @@ void http2_connection_close(http2_connection_t *c)
 		}
 	}
 
-	wuy_list_node_t *node, *safe;
-	wuy_list_iter_safe(&c->priority_closed_lru, node, safe) {
-		http2_priority_t *p = wuy_containerof(node, http2_priority_t, closed_node);
+	http2_priority_t *p;
+	while(wuy_list_pop_type(&c->priority_closed_lru, p, closed_node)) {
 		free(p);
 	}
 
@@ -727,7 +728,7 @@ static void http2_priority_update(http2_priority_t *p, http2_connection_t *c,
 	while (p) {
 		if (p->s == NULL) {
 			wuy_list_delete(&p->closed_node);
-			wuy_list_insert(&c->priority_closed_lru, &p->closed_node);
+			wuy_list_append(&c->priority_closed_lru, &p->closed_node);
 		}
 		p = p->parent;
 	}
@@ -772,7 +773,8 @@ static int http2_process_frame_priority(http2_connection_t *c,
 			return length;
 		}
 
-		wuy_list_insert(&c->priority_closed_lru, &p->closed_node);
+		c->priority_closed_num++;
+		wuy_list_append(&c->priority_closed_lru, &p->closed_node);
 	}
 
 	http2_priority_update(p, c, exclusive, dependency, weight);
