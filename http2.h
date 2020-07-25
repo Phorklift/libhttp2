@@ -40,9 +40,16 @@ int http2_process_input(http2_connection_t *c, const uint8_t *buf_pos, int buf_l
 
 void http2_schedular(http2_connection_t *c);
 
-int http2_connection_idle_time(http2_connection_t *c);
+void http2_connection_ping(http2_connection_t *c);
 
-void http2_connection_keep_alive(http2_connection_t *c);
+enum http2_connection_state {
+	HTTP2_CSTATE_READING,
+	HTTP2_CSTATE_RESPONSING,
+	HTTP2_CSTATE_IDLE,
+	HTTP2_CSTATE_CLOSED,
+};
+enum http2_connection_state http2_connection_state(http2_connection_t *c);
+bool http2_connection_want_read(http2_connection_t *c);
 
 /* stream */
 void http2_stream_set_app_data(http2_stream_t *s, void *data);

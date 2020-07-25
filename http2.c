@@ -260,7 +260,7 @@ static void http2_send_frame_ping(http2_connection_t *c, const uint8_t *ack)
 	http2_hook_control_frame(c, buffer, sizeof(buffer));
 }
 
-void http2_connection_keep_alive(http2_connection_t *c)
+void http2_connection_ping(http2_connection_t *c)
 {
 	http2_send_frame_ping(c, NULL);
 	c->want_ping_ack = true;
@@ -1037,6 +1037,33 @@ int http2_process_input(http2_connection_t *c, const uint8_t *buf_pos, int buf_l
 
 	http2_log(c, "[debug] process end with total %d", buf_len - buf_left);
 	return buf_len - buf_left;
+}
+
+// bool http2_connection_want_read(http2_connection_t *c)
+enum http2_connection_state http2_connection_state(http2_connection_t *c)
+{
+	if (c->recv_goaway) {
+		return HTTP2_CSTATE_CLOSED;
+	}
+
+	if (c->want_ping_ack || c->want_settings_ack) {
+		return HTTP2_CSTATE_READING;
+	}
+	if (c->frame.left != 0) {
+		return HTTP2_CSTATE_READING;
+	}
+
+	uint8_t type = c->frame.type;
+	if ((type == HTTP2_FRAME_DATA || type == HTTP2_FRAME_HEADERS || type == HTTP2_FRAME_CONTINUATION)
+			&& !(c->frame.flags & HTTP2_FLAG_END_STREAM)) {
+		return HTTP2_CSTATE_READING;
+	}
+
+	if (c->stream_num != 0) {
+		return HTTP2_CSTATE_RESPONSING;
+	}
+
+	return HTTP2_CSTATE_IDLE;
 }
 
 
