@@ -42,20 +42,13 @@ void http2_schedular(http2_connection_t *c);
 
 void http2_connection_ping(http2_connection_t *c);
 
-enum http2_connection_state {
-	HTTP2_CSTATE_READING,
-	HTTP2_CSTATE_RESPONSING,
-	HTTP2_CSTATE_IDLE,
-	HTTP2_CSTATE_CLOSED,
-};
-enum http2_connection_state http2_connection_state(http2_connection_t *c);
-bool http2_connection_want_read(http2_connection_t *c);
+bool http2_connection_in_reading(http2_connection_t *c);
 
 /* stream */
 void http2_stream_set_app_data(http2_stream_t *s, void *data);
 void *http2_stream_get_app_data(http2_stream_t *s);
 http2_connection_t *http2_stream_get_connection(http2_stream_t *s);
-void http2_stream_close(http2_stream_t *s);
+bool http2_stream_close(http2_stream_t *s);
 
 /* frame */
 #define HTTP2_FRAME_HEADER_SIZE 9

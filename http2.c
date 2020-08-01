@@ -484,15 +484,16 @@ static http2_stream_t *http2_stream_new(http2_connection_t *c)
 	return s;
 }
 
-void http2_stream_close(http2_stream_t *s)
+bool http2_stream_close(http2_stream_t *s)
 {
 	http2_connection_t *c = s->c;
-
-	c->stream_num--;
 
 	http2_priority_close(s->p);
 
 	free(s);
+
+	c->stream_num--;
+	return c->stream_num == 0;
 }
 
 static http2_stream_t *http2_stream_current(http2_connection_t *c)
@@ -1039,31 +1040,23 @@ int http2_process_input(http2_connection_t *c, const uint8_t *buf_pos, int buf_l
 	return buf_len - buf_left;
 }
 
-// bool http2_connection_want_read(http2_connection_t *c)
-enum http2_connection_state http2_connection_state(http2_connection_t *c)
+bool http2_connection_in_reading(http2_connection_t *c)
 {
-	if (c->recv_goaway) {
-		return HTTP2_CSTATE_CLOSED;
-	}
-
 	if (c->want_ping_ack || c->want_settings_ack) {
-		return HTTP2_CSTATE_READING;
+		return true;
 	}
 	if (c->frame.left != 0) {
-		return HTTP2_CSTATE_READING;
+		return true;
 	}
 
-	uint8_t type = c->frame.type;
-	if ((type == HTTP2_FRAME_DATA || type == HTTP2_FRAME_HEADERS || type == HTTP2_FRAME_CONTINUATION)
-			&& !(c->frame.flags & HTTP2_FLAG_END_STREAM)) {
-		return HTTP2_CSTATE_READING;
+	switch (c->frame.type) {
+	case HTTP2_FRAME_DATA:
+	case HTTP2_FRAME_HEADERS:
+	case HTTP2_FRAME_CONTINUATION:
+		return !(c->frame.flags & HTTP2_FLAG_END_STREAM);
+	default:
+		return false;
 	}
-
-	if (c->stream_num != 0) {
-		return HTTP2_CSTATE_RESPONSING;
-	}
-
-	return HTTP2_CSTATE_IDLE;
 }
 
 
