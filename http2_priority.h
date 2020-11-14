@@ -34,6 +34,8 @@ void http2_priority_close(struct http2_priority *p);
 void http2_priority_update(struct http2_priority *p, struct http2_connection *c,
 		bool exclusive, uint32_t dependency, uint8_t weight);
 
+void http2_priority_consume(struct http2_priority *p, int length);
+
 struct http2_priority *http2_priority_hash_search(struct http2_connection *c, uint32_t id);
 
 #endif

@@ -11,12 +11,7 @@
 #include "http2.h"
 
 
-http2_stream_header_f http2_hook_stream_header;
-http2_stream_body_f http2_hook_stream_body;
-http2_stream_close_f http2_hook_stream_close;
-http2_stream_response_f http2_hook_stream_response;
-http2_control_frame_f http2_hook_control_frame;
-http2_log_f http2_hook_log;
+const struct http2_hooks *http2_hooks;
 
 
 void http2_build_frame_header(uint8_t *buf, int length,
@@ -86,32 +81,7 @@ void http2_make_frame_body(struct http2_stream *s, uint8_t *frame_pos,
 	s->send_window -= length;
 	s->c->send_window -= length;
 
-	/* update all ancients' consumed */ // TODO move to http2_priority.c
-	float consumed = (float)length;
-	struct http2_priority *p;
-	for (p = s->p; p != NULL; p = p->parent) {
-		p->consumed += consumed / p->weight;
-
-		if (p->exclusive) {
-			continue;
-		}
-
-		/* sort the non-exclusive priority in consumed order */
-		wuy_list_t *children = (p->parent != NULL) ? &p->parent->children
-				: &s->c->priority_root_children;
-
-		struct http2_priority *older;
-		wuy_list_iter_reverse_type(children, older, brother) {
-			if (older == p) {
-				break;
-			}
-			if (older->exclusive || older->consumed <= p->consumed) {
-				wuy_list_delete(&p->brother);
-				wuy_list_add_after(&older->brother, &p->brother);
-				break;
-			}
-		}
-	}
+	http2_priority_consume(s->p, length);
 }
 
 static void http2_send_frame_goaway(struct http2_connection *c, uint32_t error_code)
@@ -128,7 +98,7 @@ static void http2_send_frame_goaway(struct http2_connection *c, uint32_t error_c
 	goaway->error_code = error_code;
 
 	http2_build_frame_header(buffer, sizeof(struct http2_goaway), HTTP2_FRAME_GOAWAY, 0, 0);
-	http2_hook_control_frame(c, buffer, sizeof(buffer));
+	http2_hooks->control_frame(c, buffer, sizeof(buffer));
 }
 
 
@@ -136,7 +106,7 @@ static void http2_send_frame_goaway(struct http2_connection *c, uint32_t error_c
 
 struct http2_stream *http2_stream_new(struct http2_connection *c)
 {
-	http2_log(c, "new stream: %u", c->frame.stream_id);
+	http2_log_debug(c, "new stream: %u", c->frame.stream_id);
 
 	struct http2_stream *s = calloc(1, sizeof(struct http2_stream));
 	if (s == NULL) {
@@ -155,10 +125,15 @@ struct http2_stream *http2_stream_new(struct http2_connection *c)
 	c->stream_num++;
 	c->last_stream_id_in = c->frame.stream_id;
 
+	if (!http2_hooks->stream_new(s, c)) {
+		free(s);
+		return NULL;
+	}
+
 	return s;
 }
 
-bool http2_stream_close(struct http2_stream *s)
+void http2_stream_close(struct http2_stream *s)
 {
 	struct http2_connection *c = s->c;
 
@@ -167,14 +142,13 @@ bool http2_stream_close(struct http2_stream *s)
 	free(s);
 
 	c->stream_num--;
-	return c->stream_num == 0;
 }
 
 void http2_stream_set_app_data(struct http2_stream *s, void *data)
 {
 	s->app_data = data;
 }
-void *http2_stream_get_app_data(struct http2_stream *s)
+void *http2_stream_get_app_data(const struct http2_stream *s)
 {
 	return s->app_data;
 }
@@ -198,13 +172,14 @@ struct http2_connection *http2_connection_new(const struct http2_settings *setti
 		return NULL;
 	}
 
-	http2_log(c, "[debug] new connection %p", c);
+	http2_log_debug(c, "new connection %p", c);
 
 	c->frame.type = HTTP2_FRAME_PREFACE;
 	c->frame.left = 24; /* length of preface */
 	c->send_window = settings->initial_window_size;
 	c->local_settings = settings;
 	c->hpack_decode = hpack_new(4096); /* see RFC7540 section 6.5.2 */
+	c->log_level = HTTP2_LOG_NONE;
 	wuy_list_init(&c->priority_root_children);
 	wuy_list_init(&c->priority_closed_lru);
 
@@ -218,7 +193,7 @@ struct http2_connection *http2_connection_new(const struct http2_settings *setti
 
 void http2_connection_close(struct http2_connection *c)
 {
-	http2_log(c, "[debug] close connection %p", c);
+	http2_log_debug(c, "close connection %p", c);
 
 	http2_send_frame_goaway(c, c->goaway_error_code);
 
@@ -230,7 +205,7 @@ void http2_connection_close(struct http2_connection *c)
 		wuy_hlist_iter_type(&c->priority_buckets[i], p, hash_node) {
 			if (p->s != NULL) {
 				/* http2_stream_close() is expected to be called in the hook */
-				http2_hook_stream_close(p->s);
+				http2_hooks->stream_close(p->s);
 			}
 		}
 	}
@@ -243,11 +218,38 @@ void http2_connection_close(struct http2_connection *c)
 	free(c);
 }
 
+bool http2_connection_in_reading(const struct http2_connection *c)
+{
+	if (c->want_ping_ack || c->want_settings_ack) {
+		return true;
+	}
+	if (c->frame.left != 0) {
+		return true;
+	}
+
+	switch (c->frame.type) {
+	case HTTP2_FRAME_DATA:
+	case HTTP2_FRAME_HEADERS:
+	case HTTP2_FRAME_CONTINUATION:
+		return !(c->frame.flags & HTTP2_FLAG_END_STREAM);
+	default:
+		return false;
+	}
+}
+bool http2_connection_in_idle(const struct http2_connection *c)
+{
+	return c->stream_num == 0;
+}
+
+void http2_connection_set_log_level(http2_connection_t *c, enum http2_log_level log_level)
+{
+	c->log_level = log_level;
+}
 void http2_connection_set_app_data(struct http2_connection *c, void *data)
 {
 	c->app_data = data;
 }
-void *http2_connection_get_app_data(struct http2_connection *c)
+void *http2_connection_get_app_data(const struct http2_connection *c)
 {
 	return c->app_data;
 }
@@ -258,22 +260,7 @@ uint32_t http2_connection_get_send_window(struct http2_connection *c)
 
 
 /* == library init */
-
-void http2_library_init(bool (*stream_header)(struct http2_stream *, const char *name_str,
-			int name_len, const char *value_str, int value_len),
-		bool (*stream_body)(struct http2_stream *, const uint8_t *buf, int len),
-		void (*stream_close)(struct http2_stream *),
-		bool (*stream_response)(struct http2_stream *, int window),
-		bool (*control_frame)(struct http2_connection *, const uint8_t *buf, int len))
+void http2_library_init(const struct http2_hooks *hooks)
 {
-	http2_hook_stream_header = stream_header;
-	http2_hook_stream_body = stream_body;
-	http2_hook_stream_close = stream_close;
-	http2_hook_stream_response = stream_response;
-	http2_hook_control_frame = control_frame;
-}
-
-void http2_set_log(http2_log_f log)
-{
-	http2_hook_log = log;
+	http2_hooks = hooks;
 }

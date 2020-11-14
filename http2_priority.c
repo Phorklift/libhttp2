@@ -101,7 +101,7 @@ static void http2_priority_clean(struct http2_connection *c)
 void http2_priority_update(struct http2_priority *p, struct http2_connection *c,
 		bool exclusive, uint32_t dependency, uint8_t weight)
 {
-	http2_log(c, "http2_priority_update %u on %u, weight=%d, exclusive=%d",
+	http2_log_debug(c, "http2_priority_update %u on %u, weight=%d, exclusive=%d",
 			p->id, dependency, weight, exclusive);
 
 	p->exclusive = exclusive;
@@ -126,6 +126,35 @@ void http2_priority_update(struct http2_priority *p, struct http2_connection *c,
 	}
 }
 
+void http2_priority_consume(struct http2_priority *p, int length)
+{
+	float consumed = (float)length;
+	wuy_list_t *root = &p->s->c->priority_root_children;
+
+	for (; p != NULL; p = p->parent) {
+		p->consumed += consumed / p->weight;
+
+		if (p->exclusive) {
+			continue;
+		}
+
+		/* sort the non-exclusive priority in consumed order */
+		wuy_list_t *children = (p->parent != NULL) ? &p->parent->children : root;
+
+		struct http2_priority *older;
+		wuy_list_iter_reverse_type(children, older, brother) {
+			if (older == p) {
+				break;
+			}
+			if (older->exclusive || older->consumed <= p->consumed) {
+				wuy_list_delete(&p->brother);
+				wuy_list_add_after(&older->brother, &p->brother);
+				break;
+			}
+		}
+	}
+}
+
 static int http2_priority_schedular(wuy_list_t *children)
 {
 	int actives = 0;
@@ -133,13 +162,13 @@ static int http2_priority_schedular(wuy_list_t *children)
 	struct http2_priority *p, *safe;
 	wuy_list_iter_safe_type(children, p, safe, brother) {
 		if (p->s != NULL && p->active) {
-			http2_log(p->s->c, "[debug] schedular pick stream: %u", p->id);
+			http2_log_debug(p->s->c, "schedular pick stream: %u", p->id);
 
 			/* Clear p->active in case the stream becomes inactive.
 			 * We will active it later in http2_make_frame_body() if still active. */
 			p->active = false;
 
-			if (!http2_hook_stream_response(p->s, 0)) {
+			if (!http2_hooks->stream_response(p->s, 0)) {
 				return -1;
 			}
 
@@ -160,10 +189,16 @@ static int http2_priority_schedular(wuy_list_t *children)
 
 void http2_schedular(struct http2_connection *c)
 {
-	http2_log(c, "~~~ start http2_schedular");
-	while (http2_priority_schedular(&c->priority_root_children) > 0)
-		printf("http2_schedular again\n"); // do nothing
-	http2_log(c, "~~~ end of http2_schedular");
+	http2_log_debug(c, "[[[ http2_schedular");
+
+	int actives;
+	do {
+		actives = http2_priority_schedular(&c->priority_root_children);
+		http2_log_debug(c, "still actives %d", actives);
+
+	} while (actives > 0);
+
+	http2_log_debug(c, "]]] end of schedular");
 
 	http2_priority_clean(c);
 }

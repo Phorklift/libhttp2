@@ -16,7 +16,7 @@ static void http2_send_frame_ping(struct http2_connection *c, const uint8_t *ack
 	}
 
 	http2_build_frame_header(buffer, 8, HTTP2_FRAME_PING, flags, 0);
-	http2_hook_control_frame(c, buffer, sizeof(buffer));
+	http2_hooks->control_frame(c, buffer, sizeof(buffer));
 }
 
 void http2_connection_ping(struct http2_connection *c)
@@ -33,14 +33,14 @@ static void http2_send_frame_settings(struct http2_connection *c)
 	memcpy(buffer + sizeof(struct http2_frame_header), payload, sizeof(payload));
 
 	http2_build_frame_header(buffer, sizeof(payload), HTTP2_FRAME_SETTINGS, 0, 0);
-	http2_hook_control_frame(c, buffer, sizeof(struct http2_frame_header) + sizeof(payload));
+	http2_hooks->control_frame(c, buffer, sizeof(struct http2_frame_header) + sizeof(payload));
 }
 
 static int http2_send_frame_settings_ack(struct http2_connection *c)
 {
 	uint8_t buffer[sizeof(struct http2_frame_header)];
 	http2_build_frame_header(buffer, 0, HTTP2_FRAME_SETTINGS, HTTP2_FLAG_ACK, 0);
-	http2_hook_control_frame(c, buffer, sizeof(buffer));
+	http2_hooks->control_frame(c, buffer, sizeof(buffer));
 	return 0;
 }
 
@@ -55,7 +55,7 @@ static void http2_send_frame_rst_stream(struct http2_connection *c, uint32_t id,
 	memcpy(buffer + sizeof(struct http2_frame_header), &error_code, 4); // bigendian??
 
 	http2_build_frame_header(buffer, 4, HTTP2_FRAME_RST_STREAM, 0, id);
-	http2_hook_control_frame(c, buffer, sizeof(buffer));
+	http2_hooks->control_frame(c, buffer, sizeof(buffer));
 
 	c->last_stream_id_reset = id;
 }
@@ -81,11 +81,11 @@ static int http2_process_frame_settings(struct http2_connection *c,
 		return length;
 	}
 	if (c->frame.left % 6 != 0) {
-		http2_log(c, "invalid SETTINGS frame");
+		http2_log_error(c, "invalid SETTINGS frame");
 		return HTTP2_FRAME_SIZE_ERROR;
 	}
 	if (c->frame.left > 6 * 10) {
-		http2_log(c, "too long SETTINGS frame");
+		http2_log_error(c, "too long SETTINGS frame");
 		return HTTP2_FRAME_SIZE_ERROR;
 	}
 	if (length < c->frame.left) {
@@ -111,7 +111,7 @@ static int http2_process_frame_settings(struct http2_connection *c,
 			break;
 		case 0x4:
 			if (value > 0x7FFFFFFF) {
-				http2_log(c, "too big WINDOW_SIZE");
+				http2_log_error(c, "too big WINDOW_SIZE");
 				return HTTP2_PROTOCOL_ERROR;
 			}
 			c->remote_settings.initial_window_size = value;
@@ -143,7 +143,7 @@ static int http2_process_frame_ping(struct http2_connection *c,
 		return length;
 	}
 	if (c->frame.left != 8) {
-		http2_log(c, "invalid PING frame");
+		http2_log_error(c, "invalid PING frame");
 		return HTTP2_FRAME_SIZE_ERROR;
 	}
 	if (length < c->frame.left) {
@@ -168,12 +168,12 @@ static int http2_process_frame_goaway(struct http2_connection *c,
 	} *goaway = (struct http2_goaway *)buffer;
 
 	if (length < sizeof(struct http2_goaway)) {
-		http2_log(c, "invalid GOAWAY frame");
+		http2_log_error(c, "invalid GOAWAY frame");
 		return HTTP2_FRAME_SIZE_ERROR;
 	}
 
 	goaway->additional_debug[length - sizeof(struct http2_goaway) - 1] = '\0';
-	http2_log(c, "GOAWAY: %x %s", goaway->error_code, goaway->additional_debug);
+	http2_log_debug(c, "GOAWAY: %x %s", goaway->error_code, goaway->additional_debug);
 
 	c->recv_goaway = true;
 	return length;
@@ -186,11 +186,13 @@ static int http2_process_frame_window_update(struct http2_connection *c,
 		return 0;
 	}
 	if (c->frame.left != 4) {
+		http2_log_error(c, "invalid WINDOW_UPDATE frame");
 		return HTTP2_FRAME_SIZE_ERROR;
 	}
 
 	const uint8_t *p = buffer;
 	if ((p[0] & 0x80) != 0) {
+		http2_log_error(c, "invalid WINDOW_UPDATE frame");
 		return HTTP2_FRAME_SIZE_ERROR;
 	}
 	uint32_t size = p[0] << 24 | p[1] << 16 | p[2] << 8 | p[3];
@@ -204,7 +206,7 @@ static int http2_process_frame_window_update(struct http2_connection *c,
 		}
 	}
 
-	http2_log(c, "WINDOW_UPDATE %u %u", c->frame.stream_id, size);
+	http2_log_debug(c, "WINDOW_UPDATE %u %u", c->frame.stream_id, size);
 
 	return length;
 }
@@ -233,6 +235,7 @@ static int http2_process_frame_priority(struct http2_connection *c,
 		return 0;
 	}
 	if (proc_len != length) {
+		http2_log_error(c, "invalid PRIORITY frame");
 		return HTTP2_FRAME_SIZE_ERROR;
 	}
 
@@ -265,16 +268,16 @@ static int http2_process_frame_data(struct http2_connection *c,
 		return HTTP2_STREAM_CLOSED;
 	}
 	if (s->end_stream) {
-		http2_log(c, "data to end_stream");
+		http2_log_error(c, "data to end_stream");
 		return HTTP2_PROTOCOL_ERROR;
 	}
 
-	http2_hook_stream_body(s, buffer, length);
+	http2_hooks->stream_body(s, buffer, length);
 
 	/* check end_stream */
 	if (length == s->c->frame.left && (c->frame.flags & HTTP2_FLAG_END_STREAM)) {
 		s->end_stream = true;
-		http2_hook_stream_body(s, NULL, 0);
+		http2_hooks->stream_body(s, NULL, 0);
 	}
 
 	return length;
@@ -294,11 +297,11 @@ static int http2_process_header_entry(struct http2_stream *s,
 		if (proc_len == HPERR_AGAIN) {
 			return 0;
 		}
-		http2_log(s->c, "hpack decode fail");
+		http2_log_error(s->c, "hpack decode fail");
 		return HTTP2_PROTOCOL_ERROR;
 	}
 
-	http2_hook_stream_header(s, name_str, name_len, value_str, value_len);
+	http2_hooks->stream_header(s, name_str, name_len, value_str, value_len);
 
 	return proc_len;
 }
@@ -325,7 +328,7 @@ static int http2_process_payload_headers(struct http2_stream *s,
 	/* check end_headers and end_stream */
 	if (total_len == s->c->frame.left && s->end_headers) {
 		/* @name_len argument is used to info end_stream */
-		http2_hook_stream_header(s, NULL, s->end_stream, NULL, 0);
+		http2_hooks->stream_header(s, NULL, s->end_stream, NULL, 0);
 	}
 
 	s->c->frame.type = HTTP2_FRAME_HEADERS_REMAINING;
@@ -341,7 +344,7 @@ static int http2_process_frame_continuation(struct http2_connection *c,
 			? HTTP2_STREAM_CLOSED : HTTP2_PROTOCOL_ERROR;
 	}
 	if (s->end_headers) {
-		http2_log(c, "header on end_headers");
+		http2_log_error(c, "header on end_headers");
 		return HTTP2_PROTOCOL_ERROR;
 	}
 
@@ -378,11 +381,11 @@ static int http2_process_frame_headers(struct http2_connection *c,
 	/* create new stream */
 	uint32_t stream_id = c->frame.stream_id;
 	if (stream_id <= c->last_stream_id_in || (stream_id % 2) == 0) {
-		http2_log(c, "invalid stream id");
+		http2_log_error(c, "invalid stream id");
 		return HTTP2_PROTOCOL_ERROR;
 	}
 	if (c->stream_num == c->local_settings->max_concurrent_streams) {
-		http2_log(c, "exceed max_concurrent_streams");
+		http2_log_error(c, "exceed max_concurrent_streams %d", c->stream_num);
 		return HTTP2_REFUSED_STREAM;
 	}
 
@@ -411,7 +414,7 @@ static int http2_process_preface(struct http2_connection *c,
 		return 0;
 	}
 	if (memcmp(buffer, "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n", 24) != 0) {
-		http2_log(c, "invalid preface");
+		http2_log_error(c, "invalid preface");
 		return HTTP2_PROTOCOL_ERROR;
 	}
 
@@ -457,11 +460,11 @@ static int http2_process_frame_header(struct http2_connection *c,
 	c->frame.stream_id = (header->sid1 << 24) + (header->sid2 << 16)
 			+ (header->sid3 << 8) + header->sid4;
 
-	http2_log(c, "[debug] receive frame type=%d len=%d flags=0x%x sid=%d",
+	http2_log_debug(c, "receive frame type=%d len=%d flags=0x%x sid=%d",
 			c->frame.type, c->frame.left, c->frame.flags, c->frame.stream_id);
 
 	if (c->frame.type >= HTTP2_FRAME_UNKNOWN) {
-		printf("[info] unknow frame type %d\n", c->frame.type);
+		http2_log_error(c, "unknown frame type %d", c->frame.type);
 		c->frame.type = HTTP2_FRAME_UNKNOWN;
 	}
 
@@ -472,7 +475,7 @@ static int http2_process_frame_header(struct http2_connection *c,
 #define MIN(a,b) (a)<(b)?(a):(b)
 int http2_process_input(struct http2_connection *c, const uint8_t *buf_pos, int buf_len)
 {
-	http2_log(c, "[debug] http2_process_input %d", buf_len);
+	http2_log_debug(c, "[[[ http2_process_input %d", buf_len);
 
 	if (c->goaway_error_code != 0) {
 		return -2;
@@ -510,25 +513,6 @@ int http2_process_input(struct http2_connection *c, const uint8_t *buf_pos, int 
 		buf_left -= proc_len;
 	}
 
-	http2_log(c, "[debug] process end with total %d", buf_len - buf_left);
+	http2_log_debug(c, "]]] process end with total %d", buf_len - buf_left);
 	return buf_len - buf_left;
-}
-
-bool http2_connection_in_reading(struct http2_connection *c)
-{
-	if (c->want_ping_ack || c->want_settings_ack) {
-		return true;
-	}
-	if (c->frame.left != 0) {
-		return true;
-	}
-
-	switch (c->frame.type) {
-	case HTTP2_FRAME_DATA:
-	case HTTP2_FRAME_HEADERS:
-	case HTTP2_FRAME_CONTINUATION:
-		return !(c->frame.flags & HTTP2_FLAG_END_STREAM);
-	default:
-		return false;
-	}
 }

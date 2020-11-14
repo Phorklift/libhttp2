@@ -27,11 +27,13 @@ enum http2_frame_type {
 	HTTP2_FRAME_PREFACE,
 };
 
-#define HTTP2_FLAG_ACK			0x01
-#define HTTP2_FLAG_END_STREAM		0x01
-#define HTTP2_FLAG_END_HEADERS		0x04
-#define HTTP2_FLAG_PADDED		0x08
-#define HTTP2_FLAG_PRIORITY		0x20
+enum http2_frame_flag {
+	HTTP2_FLAG_ACK = 0x01,
+	HTTP2_FLAG_END_STREAM = 0x01,
+	HTTP2_FLAG_END_HEADERS = 0x04,
+	HTTP2_FLAG_PADDED = 0x08,
+	HTTP2_FLAG_PRIORITY = 0x20,
+};
 
 enum http2_error_code {
 	HTTP2_NO_ERROR = 0,
@@ -97,6 +99,8 @@ struct http2_connection {
 
 	void			*app_data;
 
+	enum http2_log_level	log_level;
+
 	bool			recv_goaway;
 	bool			want_ping_ack;
 	bool			want_settings_ack;
@@ -115,16 +119,13 @@ struct http2_stream {
 	void			*app_data;
 };
 
-extern http2_stream_header_f http2_hook_stream_header;
-extern http2_stream_body_f http2_hook_stream_body;
-extern http2_stream_close_f http2_hook_stream_close;
-extern http2_stream_response_f http2_hook_stream_response;
-extern http2_control_frame_f http2_hook_control_frame;
+extern const struct http2_hooks *http2_hooks;
 
-extern http2_log_f http2_hook_log;
+#define http2_log(c, level, fmt, ...) \
+	if (level <= c->log_level) http2_hooks->log(c, level, fmt, ##__VA_ARGS__)
 
-#define http2_log(c, fmt, ...) \
-	if (http2_hook_log != NULL) http2_hook_log(c, fmt, ##__VA_ARGS__)
+#define http2_log_debug(c, fmt, ...) http2_log(c, HTTP2_LOG_DEBUG, fmt, ##__VA_ARGS__)
+#define http2_log_error(c, fmt, ...) http2_log(c, HTTP2_LOG_ERROR, fmt, ##__VA_ARGS__)
 
 
 struct http2_stream *http2_stream_new(struct http2_connection *c);
