@@ -185,7 +185,7 @@ struct http2_connection *http2_connection_new(const struct http2_settings *setti
 
 	int i;
 	for (i = 0; i < HTTP2_BUCKET_SIZE; i++) {
-		wuy_hlist_head_init(&c->priority_buckets[i]);
+		wuy_hlist_init(&c->priority_buckets[i]);
 	}
 
 	return c;

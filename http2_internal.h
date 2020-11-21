@@ -64,7 +64,7 @@ struct http2_connection {
 
 #define HTTP2_BUCKET_SIZE	8
 	/* all priority nodes (include open and closed) are indexed here for searching */
-	wuy_hlist_head_t	priority_buckets[HTTP2_BUCKET_SIZE];
+	wuy_hlist_t		priority_buckets[HTTP2_BUCKET_SIZE];
 
 	/* all priority nodes (include open and closed) are listed here as dependency tree */
 	wuy_list_t		priority_root_children;
