@@ -39,7 +39,7 @@ struct http2_hooks {
 	void (*stream_close)(http2_stream_t *);
 
 	/* on ready to response stream */
-	bool (*stream_response)(http2_stream_t *, int window);
+	int (*stream_response)(http2_stream_t *, int window);
 
 	/* on sending control frame */
 	bool (*control_frame)(http2_connection_t *, const uint8_t *buf, int len);

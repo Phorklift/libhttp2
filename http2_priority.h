@@ -10,7 +10,6 @@
 #include "http2.h"
 
 struct http2_priority {
-	bool			active;
 	bool			exclusive;
 	uint8_t			weight;
 

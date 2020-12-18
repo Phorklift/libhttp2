@@ -58,10 +58,6 @@ void http2_make_frame_headers(struct http2_stream *s, uint8_t *frame_pos,
 	http2_build_frame_header(frame_pos, length, HTTP2_FRAME_HEADERS, flags, s->p->id);
 }
 
-void http2_stream_active_tmp(struct http2_stream *s)
-{
-	s->p->active = true;
-}
 void http2_make_frame_body(struct http2_stream *s, uint8_t *frame_pos,
 		int length, bool is_stream_end)
 {
@@ -70,18 +66,6 @@ void http2_make_frame_body(struct http2_stream *s, uint8_t *frame_pos,
 		flags |= HTTP2_FLAG_END_STREAM;
 	}
 	http2_build_frame_header(frame_pos, length, HTTP2_FRAME_DATA, flags, s->p->id);
-
-	if (length == 0) {
-		return;
-	}
-
-	/* set active back */
-	s->p->active = true;
-
-	s->send_window -= length;
-	s->c->send_window -= length;
-
-	http2_priority_consume(s->p, length);
 }
 
 static void http2_send_frame_goaway(struct http2_connection *c, uint32_t error_code)

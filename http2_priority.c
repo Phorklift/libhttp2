@@ -56,7 +56,6 @@ struct http2_priority *http2_priority_new(struct http2_connection *c, uint32_t i
 	}
 
 	p->id = id;
-	p->active = true;
 	http2_priority_hash_add(c, p);
 	wuy_list_node_init(&p->brother);
 	wuy_list_init(&p->children);
@@ -155,48 +154,39 @@ void http2_priority_consume(struct http2_priority *p, int length)
 	}
 }
 
-static int http2_priority_schedular(wuy_list_t *children)
+static void http2_priority_schedular(wuy_list_t *children)
 {
-	int actives = 0;
-
 	struct http2_priority *p, *safe;
 	wuy_list_iter_safe_type(children, p, safe, brother) {
-		if (p->s != NULL && p->active) {
-			http2_log_debug(p->s->c, "schedular pick stream: %u", p->id);
 
-			/* Clear p->active in case the stream becomes inactive.
-			 * We will active it later in http2_make_frame_body() if still active. */
-			p->active = false;
+		if (p->s != NULL) {
+			http2_log_debug(p->s->c, "schedular stream=%u, window=%d", p->id, 0);
 
-			if (!http2_hooks->stream_response(p->s, 0)) {
-				return -1;
+			int sent_len = http2_hooks->stream_response(p->s, 0);
+			if (sent_len < 0) {
+				return;
 			}
-
-			if (p->s != NULL && p->active) {
-				actives++;
+			if (p->s == NULL) {
+				continue;
 			}
+			// TODO if (sent_len == window) { response again }
+
+			p->s->send_window -= sent_len;
+			p->s->c->send_window -= sent_len;
+			http2_priority_consume(p, sent_len);
 		}
 
-		/* search an active stream from its children */
-		int ret = http2_priority_schedular(&p->children);
-		if (ret == -1) {
-			return -1;
-		}
-		actives += ret;
+		/* call its children */
+		http2_priority_schedular(&p->children);
 	}
-	return actives;
 }
 
 void http2_schedular(struct http2_connection *c)
 {
 	http2_log_debug(c, "[[[ http2_schedular");
 
-	int actives;
-	do {
-		actives = http2_priority_schedular(&c->priority_root_children);
-		http2_log_debug(c, "still actives %d", actives);
-
-	} while (actives > 0);
+	http2_priority_schedular(&c->priority_root_children);
+	// TODO schedular again
 
 	http2_log_debug(c, "]]] end of schedular");
 
