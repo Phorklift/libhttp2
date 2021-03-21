@@ -39,7 +39,7 @@ struct http2_hooks {
 	void (*stream_close)(http2_stream_t *);
 
 	/* on ready to response stream */
-	int (*stream_response)(http2_stream_t *, int window);
+	int (*stream_response)(http2_stream_t *);
 
 	/* on sending control frame */
 	bool (*control_frame)(http2_connection_t *, const uint8_t *buf, int len);
@@ -78,6 +78,8 @@ void http2_stream_close(http2_stream_t *s);
 void http2_stream_set_app_data(http2_stream_t *s, void *data);
 
 void *http2_stream_get_app_data(const http2_stream_t *s);
+
+int32_t http2_stream_window(struct http2_stream *s);
 
 /* frame */
 #define HTTP2_FRAME_HEADER_SIZE 9

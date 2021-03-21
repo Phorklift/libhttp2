@@ -117,6 +117,7 @@ struct http2_stream *http2_stream_new(struct http2_connection *c)
 	return s;
 }
 
+/* This is called by the out program as API. */
 void http2_stream_close(struct http2_stream *s)
 {
 	struct http2_connection *c = s->c;
@@ -126,6 +127,13 @@ void http2_stream_close(struct http2_stream *s)
 	free(s);
 
 	c->stream_num--;
+}
+
+/* This is called by libhttp, and http2_stream_close() is expected
+ * to be called in the hook */
+void http2_stream_close_internal(struct http2_stream *s)
+{
+	http2_hooks->stream_close(s);
 }
 
 void http2_stream_set_app_data(struct http2_stream *s, void *data)
@@ -141,7 +149,7 @@ struct http2_connection *http2_stream_get_connection(struct http2_stream *s)
 	return s->c;
 }
 #define MIN(a,b) (a)<(b)?(a):(b)
-uint32_t http2_stream_get_send_window(struct http2_stream *s)
+int32_t http2_stream_window(struct http2_stream *s)
 {
 	return MIN(s->send_window, s->c->send_window);
 }
@@ -188,8 +196,7 @@ void http2_connection_close(struct http2_connection *c)
 		struct http2_priority *p;
 		wuy_hlist_iter_type(&c->priority_buckets[i], p, hash_node) {
 			if (p->s != NULL) {
-				/* http2_stream_close() is expected to be called in the hook */
-				http2_hooks->stream_close(p->s);
+				http2_stream_close_internal(p->s);
 			}
 		}
 	}

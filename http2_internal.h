@@ -84,7 +84,7 @@ struct http2_connection {
 
 	uint32_t		goaway_error_code;
 
-	uint32_t		send_window;
+	int32_t			send_window;
 
 	/* current frame in parse */
 	struct {
@@ -113,7 +113,7 @@ struct http2_stream {
 
 	struct http2_priority	*p;
 
-	uint32_t		send_window;
+	int32_t			send_window;
 
 	unsigned		end_headers:1;
 	unsigned		end_stream:1;
@@ -131,6 +131,8 @@ extern const struct http2_hooks *http2_hooks;
 
 
 struct http2_stream *http2_stream_new(struct http2_connection *c);
+
+void http2_stream_close_internal(struct http2_stream *s);
 
 void http2_build_frame_header(uint8_t *buf, int length,
 		uint8_t type, uint8_t flags, uint32_t stream_id);

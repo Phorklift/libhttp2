@@ -162,7 +162,7 @@ static void http2_priority_schedular(wuy_list_t *children)
 		if (p->s != NULL) {
 			http2_log_debug(p->s->c, "schedular stream=%u, window=%d", p->id, 0);
 
-			int sent_len = http2_hooks->stream_response(p->s, 0);
+			int sent_len = http2_hooks->stream_response(p->s);
 			if (sent_len < 0) {
 				return;
 			}

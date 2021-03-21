@@ -170,7 +170,7 @@ static int http2_process_frame_rst_stream(struct http2_connection *c,
 
 	struct http2_stream *s = http2_process_current(c);
 	if (s != NULL) {
-		http2_hooks->stream_close(s);
+		http2_stream_close_internal(s);
 	}
 	return length;
 }
@@ -220,10 +220,18 @@ static int http2_process_frame_window_update(struct http2_connection *c,
 
 	if (c->frame.stream_id == 0) {
 		c->send_window += size;
+		if (c->send_window < 0) {
+			http2_log_error(c, "connection WINDOW_UPDATE size exceed");
+			return HTTP2_FLOW_CONTROL_ERROR;
+		}
 	} else {
 		struct http2_stream *s = http2_process_current(c);
 		if (s != NULL) {
 			s->send_window += size;
+			if (s->send_window < 0) {
+				http2_log_error(c, "stream WINDOW_UPDATE size exceed");
+				return HTTP2_FLOW_CONTROL_ERROR;
+			}
 		}
 	}
 
@@ -238,7 +246,7 @@ static int http2_process_priority(const uint8_t *p, int length,
 	if (length < 5) {
 		return 0;
 	}
-	*exclusive = p[0] > 7;
+	*exclusive = p[0] >> 7;
 	*dependency = (p[0] & 0x7F) << 24 | p[1] << 16 | p[2] << 8 | p[3];
 	*weight = p[4];
 	return 5;
