@@ -74,6 +74,13 @@ static int http2_process_frame_unknown(struct http2_connection *c,
 	return length;
 }
 
+static int http2_process_frame_push_promise(struct http2_connection *c,
+		const uint8_t *buffer, int length)
+{
+	http2_log_error(c, "not-expect PUSH_PROMISE frame");
+	return length;
+}
+
 static int http2_process_frame_settings(struct http2_connection *c,
 		const uint8_t *buffer, int length)
 {
@@ -151,6 +158,20 @@ static int http2_process_frame_ping(struct http2_connection *c,
 	}
 
 	http2_send_frame_ping(c, buffer);
+	return length;
+}
+
+static int http2_process_frame_rst_stream(struct http2_connection *c,
+		const uint8_t *buffer, int length)
+{
+	uint32_t code = *(uint32_t *)buffer;
+
+	http2_log_debug(c, "RST_STREAM: 0x%x, sid=%d", code, c->frame.stream_id);
+
+	struct http2_stream *s = http2_process_current(c);
+	if (s != NULL) {
+		http2_hooks->stream_close(s);
+	}
 	return length;
 }
 
@@ -429,13 +450,15 @@ static http2_process_f *http2_frame_handlers[] = {
 	http2_process_frame_data,
 	http2_process_frame_headers,
 	http2_process_frame_priority,
-	http2_process_frame_unknown,
+	http2_process_frame_rst_stream,
 	http2_process_frame_settings,
-	http2_process_frame_unknown,
+	http2_process_frame_push_promise,
 	http2_process_frame_ping,
 	http2_process_frame_goaway,
 	http2_process_frame_window_update,
 	http2_process_frame_continuation,
+
+	/* internal */
 	http2_process_frame_unknown,
 	http2_process_frame_headers_remaining,
 	http2_process_preface,
