@@ -31,19 +31,17 @@ void http2_build_frame_header(uint8_t *buf, int length,
 
 int http2_make_status_code(uint8_t *out_pos, int out_len, int status_code)
 {
-	// TODO trasfer return error-code
 	return hpack_encode_status(status_code, out_pos, out_pos + out_len);
 }
 int http2_make_content_length(uint8_t *out_pos, int out_len, size_t content_length)
 {
-	// TODO trasfer return error-code
 	return hpack_encode_content_length(content_length, out_pos, out_pos + out_len);
 }
 int http2_make_header(struct http2_stream *s, uint8_t *out_pos, int out_len,
 		const char *name_str, int name_len, const char *value_str, int value_len)
 {
-	// TODO encode_hpack -> NULL
-	return hpack_encode_header(NULL, name_str, name_len, value_str, value_len, out_pos, out_pos + out_len);
+	return hpack_encode_header(NULL, name_str, name_len, value_str, value_len,
+			out_pos, out_pos + out_len);
 }
 void http2_make_frame_headers(struct http2_stream *s, uint8_t *frame_pos,
 		int length, bool is_stream_end, bool is_headers_end)
@@ -66,6 +64,11 @@ void http2_make_frame_body(struct http2_stream *s, uint8_t *frame_pos,
 		flags |= HTTP2_FLAG_END_STREAM;
 	}
 	http2_build_frame_header(frame_pos, length, HTTP2_FRAME_DATA, flags, s->p->id);
+
+	/* update send-window and priority */
+	s->c->send_window -= length;
+	s->send_window -= length;
+	http2_priority_consume(s->p, length);
 }
 
 static void http2_send_frame_goaway(struct http2_connection *c, uint32_t error_code)

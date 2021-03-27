@@ -154,39 +154,34 @@ void http2_priority_consume(struct http2_priority *p, int length)
 	}
 }
 
-static void http2_priority_schedular(wuy_list_t *children)
+static bool http2_priority_schedular(struct http2_connection *c, wuy_list_t *children)
 {
 	struct http2_priority *p, *safe;
 	wuy_list_iter_safe_type(children, p, safe, brother) {
 
 		if (p->s != NULL) {
-			http2_log_debug(p->s->c, "schedular stream=%u, window=%d", p->id, 0);
+			http2_log_debug(c, "schedular stream=%u", p->id);
 
-			int sent_len = http2_hooks->stream_response(p->s);
-			if (sent_len < 0) {
-				return;
+			if (!http2_hooks->stream_response(p->s)) {
+				/* the connection has been closed */
+				return false;
 			}
-			if (p->s == NULL) {
-				continue;
-			}
-			// TODO if (sent_len == window) { response again }
-
-			p->s->send_window -= sent_len;
-			p->s->c->send_window -= sent_len;
-			http2_priority_consume(p, sent_len);
 		}
 
 		/* call its children */
-		http2_priority_schedular(&p->children);
+		if (!http2_priority_schedular(c, &p->children)) {
+			return false;
+		}
 	}
+
+	return true;
 }
 
 void http2_schedular(struct http2_connection *c)
 {
 	http2_log_debug(c, "[[[ http2_schedular");
 
-	http2_priority_schedular(&c->priority_root_children);
-	// TODO schedular again
+	http2_priority_schedular(c, &c->priority_root_children);
 
 	http2_log_debug(c, "]]] end of schedular");
 
