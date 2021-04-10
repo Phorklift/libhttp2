@@ -100,7 +100,7 @@ static void http2_priority_clean(struct http2_connection *c)
 void http2_priority_update(struct http2_priority *p, struct http2_connection *c,
 		bool exclusive, uint32_t dependency, uint8_t weight)
 {
-	http2_log_debug(c, "http2_priority_update %u on %u, weight=%d, exclusive=%d",
+	http2_log(c, "http2_priority_update %u on %u, weight=%d, exclusive=%d",
 			p->id, dependency, weight, exclusive);
 
 	p->exclusive = exclusive;
@@ -160,7 +160,7 @@ static bool http2_priority_schedular(struct http2_connection *c, wuy_list_t *chi
 	wuy_list_iter_safe_type(children, p, safe, brother) {
 
 		if (p->s != NULL) {
-			http2_log_debug(c, "schedular stream=%u", p->id);
+			http2_log(c, "schedular stream=%u", p->id);
 
 			if (!http2_hooks->stream_response(p->s)) {
 				/* the connection has been closed */
@@ -179,11 +179,11 @@ static bool http2_priority_schedular(struct http2_connection *c, wuy_list_t *chi
 
 void http2_schedular(struct http2_connection *c)
 {
-	http2_log_debug(c, "[[[ http2_schedular");
+	http2_log(c, "[[[ http2_schedular");
 
 	http2_priority_schedular(c, &c->priority_root_children);
 
-	http2_log_debug(c, "]]] end of schedular");
+	http2_log(c, "]]] end of schedular");
 
 	http2_priority_clean(c);
 }

@@ -18,12 +18,6 @@ struct http2_settings {
 	uint32_t	max_header_list_size;
 };
 
-enum http2_log_level {
-	HTTP2_LOG_DEBUG = 0,
-	HTTP2_LOG_ERROR,
-	HTTP2_LOG_NONE,
-};
-
 struct http2_hooks {
 	/* on creating new stream */
 	bool (*stream_new)(http2_stream_t *, http2_connection_t *);
@@ -45,7 +39,7 @@ struct http2_hooks {
 	bool (*control_frame)(http2_connection_t *, const uint8_t *buf, int len);
 
 	/* log */
-	void (*log)(http2_connection_t *, enum http2_log_level, const char *fmt, ...);
+	void (*log)(http2_connection_t *, const char *fmt, ...);
 };
 
 /* library init */
@@ -66,11 +60,11 @@ bool http2_connection_in_reading(const http2_connection_t *c);
 
 bool http2_connection_in_idle(const http2_connection_t *c);
 
-void http2_connection_set_log_level(http2_connection_t *c, enum http2_log_level);
-
 void http2_connection_set_app_data(http2_connection_t *c, void *data);
 
 void *http2_connection_get_app_data(const http2_connection_t *c);
+
+void http2_connection_enable_log(http2_connection_t *c);
 
 /* stream */
 void http2_stream_close(http2_stream_t *s);

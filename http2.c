@@ -93,7 +93,7 @@ static void http2_send_frame_goaway(struct http2_connection *c, uint32_t error_c
 
 struct http2_stream *http2_stream_new(struct http2_connection *c)
 {
-	http2_log_debug(c, "new stream: %u", c->frame.stream_id);
+	http2_log(c, "new stream: %u", c->frame.stream_id);
 
 	struct http2_stream *s = calloc(1, sizeof(struct http2_stream));
 	if (s == NULL) {
@@ -167,14 +167,13 @@ struct http2_connection *http2_connection_new(const struct http2_settings *setti
 		return NULL;
 	}
 
-	http2_log_debug(c, "new connection %p", c);
+	http2_log(c, "new connection %p", c);
 
 	c->frame.type = HTTP2_FRAME_PREFACE;
 	c->frame.left = 24; /* length of preface */
 	c->send_window = settings->initial_window_size;
 	c->local_settings = settings;
 	c->hpack_decode = hpack_new(4096); /* see RFC7540 section 6.5.2 */
-	c->log_level = HTTP2_LOG_NONE;
 	wuy_list_init(&c->priority_root_children);
 	wuy_list_init(&c->priority_closed_lru);
 
@@ -188,7 +187,7 @@ struct http2_connection *http2_connection_new(const struct http2_settings *setti
 
 void http2_connection_close(struct http2_connection *c)
 {
-	http2_log_debug(c, "close connection %p", c);
+	http2_log(c, "close connection %p", c);
 
 	http2_send_frame_goaway(c, c->goaway_error_code);
 
@@ -235,9 +234,9 @@ bool http2_connection_in_idle(const struct http2_connection *c)
 	return c->stream_num == 0;
 }
 
-void http2_connection_set_log_level(http2_connection_t *c, enum http2_log_level log_level)
+void http2_connection_enable_log(http2_connection_t *c)
 {
-	c->log_level = log_level;
+	c->log_enabled = true;
 }
 void http2_connection_set_app_data(struct http2_connection *c, void *data)
 {
