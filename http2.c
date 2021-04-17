@@ -211,7 +211,7 @@ void http2_connection_close(struct http2_connection *c)
 	free(c);
 }
 
-bool http2_connection_in_reading(const struct http2_connection *c)
+static bool http2_connection_in_reading(const struct http2_connection *c)
 {
 	if (c->want_ping_ack || c->want_settings_ack) {
 		return true;
@@ -229,9 +229,15 @@ bool http2_connection_in_reading(const struct http2_connection *c)
 		return false;
 	}
 }
-bool http2_connection_in_idle(const struct http2_connection *c)
+enum http2_connection_state http2_connection_state(const struct http2_connection *c)
 {
-	return c->stream_num == 0;
+	if (http2_connection_in_reading(c)) {
+		return HTTP2_CONNECTION_STATE_READING;
+	}
+	if (c->stream_num == 0) {
+		return HTTP2_CONNECTION_STATE_IDLE;
+	}
+	return HTTP2_CONNECTION_STATE_WRITING;
 }
 
 void http2_connection_enable_log(http2_connection_t *c)

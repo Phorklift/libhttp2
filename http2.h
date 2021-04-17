@@ -42,6 +42,12 @@ struct http2_hooks {
 	void (*log)(http2_connection_t *, const char *fmt, ...);
 };
 
+enum http2_connection_state {
+	HTTP2_CONNECTION_STATE_READING = 0,
+	HTTP2_CONNECTION_STATE_WRITING,
+	HTTP2_CONNECTION_STATE_IDLE,
+};
+
 /* library init */
 void http2_library_init(const struct http2_hooks *);
 
@@ -54,11 +60,9 @@ int http2_process_input(http2_connection_t *c, const uint8_t *buf_pos, int buf_l
 
 void http2_schedular(http2_connection_t *c);
 
+enum http2_connection_state http2_connection_state(const struct http2_connection *c);
+
 void http2_connection_ping(http2_connection_t *c);
-
-bool http2_connection_in_reading(const http2_connection_t *c);
-
-bool http2_connection_in_idle(const http2_connection_t *c);
 
 void http2_connection_set_app_data(http2_connection_t *c, void *data);
 
