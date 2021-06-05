@@ -37,9 +37,6 @@ struct http2_hooks {
 
 	/* on sending control frame */
 	bool (*control_frame)(http2_connection_t *, const uint8_t *buf, int len);
-
-	/* log */
-	void (*log)(http2_connection_t *, const char *fmt, ...);
 };
 
 enum http2_connection_state {
@@ -68,7 +65,8 @@ void http2_connection_set_app_data(http2_connection_t *c, void *data);
 
 void *http2_connection_get_app_data(const http2_connection_t *c);
 
-void http2_connection_enable_log(http2_connection_t *c);
+void http2_connection_enable_log(http2_connection_t *c,
+		void (*log_hook)(http2_connection_t *, const char *fmt, ...));
 
 /* stream */
 void http2_stream_close(http2_stream_t *s);

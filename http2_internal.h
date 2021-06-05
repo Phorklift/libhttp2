@@ -101,7 +101,7 @@ struct http2_connection {
 
 	void			*app_data;
 
-	bool			log_enabled;
+	void			(*log_hook)(http2_connection_t *, const char *fmt, ...);
 
 	bool			recv_goaway;
 	bool			want_ping_ack;
@@ -124,7 +124,7 @@ struct http2_stream {
 extern const struct http2_hooks *http2_hooks;
 
 #define http2_log(c, fmt, ...) \
-	if (c->log_enabled) http2_hooks->log(c, fmt, ##__VA_ARGS__)
+	if (c->log_hook != NULL) c->log_hook(c, fmt, ##__VA_ARGS__)
 
 struct http2_stream *http2_stream_new(struct http2_connection *c);
 

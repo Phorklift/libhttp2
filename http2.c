@@ -240,9 +240,10 @@ enum http2_connection_state http2_connection_state(const struct http2_connection
 	return HTTP2_CONNECTION_STATE_WRITING;
 }
 
-void http2_connection_enable_log(http2_connection_t *c)
+void http2_connection_enable_log(http2_connection_t *c,
+		void (*log_hook)(http2_connection_t *, const char *fmt, ...))
 {
-	c->log_enabled = true;
+	c->log_hook = log_hook;
 }
 void http2_connection_set_app_data(struct http2_connection *c, void *data)
 {
